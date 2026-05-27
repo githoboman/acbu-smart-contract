@@ -18,7 +18,7 @@ mod shared {
 pub mod token_contract {
     soroban_sdk::contractimport!(
         file = "../soroban_token_contract.wasm",
-        sha256 = "6b14997b915dee21082884cd5a2f1f2f0aef0073d1dcb9c5b3c674cf487fb41d"
+        sha256 = "d97a3e83c3523504e4ae1dc74b89fcaee443f77ac6c88744d0b28f963571aac5"
     );
 }
 */
@@ -488,6 +488,32 @@ impl BurningContract {
             .instance()
             .get(&DATA_KEY.paused)
             .unwrap_or(false)
+    }
+
+    // ── Dependency address updaters (admin only) ──────────────────────────
+
+    pub fn update_oracle(env: Env, new_oracle: Address) {
+        Self::check_admin(&env);
+        env.storage().instance().set(&DATA_KEY.oracle, &new_oracle);
+    }
+
+    pub fn update_reserve_tracker(env: Env, new_reserve_tracker: Address) {
+        Self::check_admin(&env);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.reserve_tracker, &new_reserve_tracker);
+    }
+
+    pub fn update_acbu_token(env: Env, new_acbu_token: Address) {
+        Self::check_admin(&env);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.acbu_token, &new_acbu_token);
+    }
+
+    pub fn update_vault(env: Env, new_vault: Address) {
+        Self::check_admin(&env);
+        env.storage().instance().set(&DATA_KEY.vault, &new_vault);
     }
 
     fn check_paused(env: &Env) {

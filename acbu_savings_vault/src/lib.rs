@@ -405,6 +405,14 @@ impl SavingsVault {
         env.storage().instance().set(&DATA_KEY.paused, &false);
     }
 
+    pub fn update_acbu_token(env: Env, new_acbu_token: Address) {
+        let admin = Self::load_admin(&env).unwrap_or_else(|e| env.panic_with_error(e));
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.acbu_token, &new_acbu_token);
+    }
+
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>, new_version: u32) {
         let admin = Self::load_admin(&env).unwrap_or_else(|e| env.panic_with_error(e));
         admin.require_auth();

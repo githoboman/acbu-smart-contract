@@ -1,13 +1,9 @@
 #![cfg(test)]
 
 use acbu_lending_pool::{BorrowEvent, RepayEvent, LendingPool, LendingPoolClient};
-use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, TryIntoVal};
-use acbu_lending_pool::{Error, LendingPool, LendingPoolClient};
-use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, Symbol};
-use shared::DECIMALS;
-// Add these imports for the lifecycle test
-use soroban_sdk::testutils::Events;
+use soroban_sdk::{symbol_short, testutils::{Address as _, Events}, Address, Env, TryIntoVal};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+use shared::DECIMALS;
 
 #[test]
 fn test_deposit_and_withdraw() {
@@ -195,6 +191,9 @@ fn test_borrow_basic() {
     let collateral: i128 = 200_000;
     let loan_id: u64 = 1;
 
+    // Mint collateral tokens to borrower
+    token_admin.mint(&borrower, &collateral);
+
     // (contract transfers ACBU *out* to borrower; collateral is recorded but not transferred in MVP)
     client.borrow(&borrower, &borrow_amount, &collateral, &loan_id);
 
@@ -206,13 +205,13 @@ fn test_borrow_basic() {
     assert_eq!(loan.borrower, borrower);
     assert_eq!(loan.collateral_amount, collateral);
 
-    // Borrower received the tokens
+    // Borrower received the tokens (loan amount, collateral was transferred to contract)
     assert_eq!(token_client.balance(&borrower), borrow_amount);
 
-    // Pool's token balance decreased by the borrowed amount
+    // Pool's token balance: initial - borrowed + collateral
     assert_eq!(
         token_client.balance(&contract_id),
-        pool_liquidity - borrow_amount
+        pool_liquidity - borrow_amount + collateral
     );
 }
 
