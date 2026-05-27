@@ -23,6 +23,10 @@ mod oracle_mock {
             DECIMALS
         }
 
+        pub fn get_acbu_usd_rate_with_timestamp(_env: Env) -> (i128, u64) {
+            (DECIMALS, 0)
+        }
+
         pub fn get_currencies(env: Env) -> Vec<CurrencyCode> {
             let mut v = Vec::new(&env);
             v.push_back(CurrencyCode::new(&env, "NGN"));
@@ -35,6 +39,10 @@ mod oracle_mock {
 
         pub fn get_rate(_env: Env, _c: CurrencyCode) -> i128 {
             DECIMALS
+        }
+
+        pub fn get_rate_with_timestamp(_env: Env, _c: CurrencyCode) -> (i128, u64) {
+            (DECIMALS, 0)
         }
 
         pub fn get_s_token_address(env: Env, _c: CurrencyCode) -> Address {
@@ -64,7 +72,7 @@ mod reserve_mock {
     }
 }
 
-fn oracle_mock_client(env: &Env, oracle: &Address) -> oracle_mock::MockOracleClient {
+fn oracle_mock_client<'a>(env: &'a Env, oracle: &'a Address) -> oracle_mock::MockOracleClient<'a> {
     oracle_mock::MockOracleClient::new(env, oracle)
 }
 
@@ -159,7 +167,7 @@ fn test_mint_from_fiat_success() {
 }
 
 #[test]
-#[should_panic(expected = "Unauthorized: only operator can call mint_from_fiat")]
+#[should_panic(expected = "Unauthorized operator")]
 fn test_mint_from_fiat_unauthorized_caller() {
     let env = Env::default();
     env.mock_all_auths();
@@ -205,7 +213,7 @@ fn test_mint_from_fiat_unauthorized_caller() {
 }
 
 #[test]
-#[should_panic(expected = "Unauthorized: only operator can call mint_from_fiat")]
+#[should_panic(expected = "Unauthorized operator")]
 fn test_mint_from_fiat_recipient_self_mint() {
     let env = Env::default();
     env.mock_all_auths();
@@ -295,7 +303,7 @@ fn test_mint_from_fiat_empty_tx_id() {
 }
 
 #[test]
-#[should_panic(expected = "Duplicate fintech transaction ID")]
+#[should_panic(expected = "Fiat transaction already processed")]
 fn test_mint_from_fiat_duplicate_tx_id() {
     let env = Env::default();
     env.mock_all_auths();
@@ -485,7 +493,7 @@ fn test_mint_from_fiat_admin_not_default_operator() {
 }
 
 #[test]
-#[should_panic(expected = "Unauthorized: only operator can call mint_from_fiat")]
+#[should_panic(expected = "Unauthorized operator")]
 fn test_mint_from_fiat_admin_when_operator_set() {
     let env = Env::default();
     env.mock_all_auths();
