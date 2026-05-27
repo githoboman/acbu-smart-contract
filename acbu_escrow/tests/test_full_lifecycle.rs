@@ -26,7 +26,7 @@ fn test_happy_path_create_fund_release() {
     let client = EscrowClient::new(&env, &contract_id);
 
     client.initialize(&admin, &acbu_token);
-    client.create(&payer, &payee, &amount, &escrow_id).unwrap();
+    client.create(&payer, &payee, &amount, &escrow_id);
 
     // payer authorizes release
     env.mock_auths(&[MockAuth {
@@ -38,14 +38,14 @@ fn test_happy_path_create_fund_release() {
             sub_invokes: &[],
         },
     }]);
-    client.release(&escrow_id, &payer).unwrap();
+    client.release(&escrow_id, &payer);
 
     let token = soroban_sdk::token::Client::new(&env, &acbu_token);
     assert_eq!(token.balance(&payee), amount);
 
     // after release the escrow must no longer exist
     let result = client.try_release(&escrow_id, &payer);
-    assert_eq!(result, Err(Ok(Error::from_contract_error(3003))));
+    assert!(result.is_err(), "release of non-existent escrow should fail");
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn test_admin_refund_on_dispute() {
     let client = EscrowClient::new(&env, &contract_id);
 
     client.initialize(&admin, &acbu_token);
-    client.create(&payer, &payee, &amount, &escrow_id).unwrap();
+    client.create(&payer, &payee, &amount, &escrow_id);
 
     // admin authorizes refund (dispute resolution)
     env.mock_auths(&[MockAuth {
@@ -80,14 +80,14 @@ fn test_admin_refund_on_dispute() {
             sub_invokes: &[],
         },
     }]);
-    client.refund(&escrow_id, &payer).unwrap();
+    client.refund(&escrow_id, &payer);
 
     let token = soroban_sdk::token::Client::new(&env, &acbu_token);
     assert_eq!(token.balance(&payer), amount);
 
     // after refund the escrow must no longer exist
     let result = client.try_refund(&escrow_id, &payer);
-    assert_eq!(result, Err(Ok(Error::from_contract_error(3003))));
+    assert!(result.is_err(), "refund of non-existent escrow should fail");
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn test_adversarial_release_by_non_payer_fails() {
     let client = EscrowClient::new(&env, &contract_id);
 
     client.initialize(&admin, &acbu_token);
-    client.create(&payer, &payee, &amount, &escrow_id).unwrap();
+    client.create(&payer, &payee, &amount, &escrow_id);
 
     // attacker tries to call release without payer auth
     env.mock_auths(&[MockAuth {

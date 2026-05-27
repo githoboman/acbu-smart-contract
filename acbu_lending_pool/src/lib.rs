@@ -62,6 +62,7 @@ pub enum Error {
     InvalidAmount = 5,
     InsufficientBalance = 6,
     Paused = 2001,
+    InvalidVersion = 2002,
 }
 
 #[contract]
@@ -86,15 +87,7 @@ impl LendingPool {
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage()
             .instance()
-            .set(&LENDER_BALANCES, &Map::<Address, i128>::new(&env));
-        env.storage()
-            .instance()
             .set(&SharedDataKey::Version, &VERSION);
-    }
-
-    /// Tracked deposit balance for a lender (ACBU units in the pool ledger).
-    pub fn get_balance(env: Env, lender: Address) -> i128 {
-        Self::lender_balance(&env, &lender)
     }
 
     pub fn deposit(env: Env, lender: Address, amount: i128) {
@@ -156,13 +149,6 @@ impl LendingPool {
 
         env.events()
             .publish((symbol_short!("withdraw"), lender), amount);
-    }
-
-    pub fn get_balance(env: Env, lender: Address) -> i128 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Balance(lender))
-            .unwrap_or(0)
     }
 
     pub fn borrow(
@@ -317,13 +303,11 @@ impl LendingPool {
             .set(&SharedDataKey::Version, &new_version);
     }
 
-    fn lender_balance(env: &Env, lender: &Address) -> i128 {
-        let bals: Map<Address, i128> = env
-            .storage()
-            .instance()
-            .get(&LENDER_BALANCES)
-            .unwrap_or_else(|| Map::new(env));
-        bals.get(lender.clone()).unwrap_or(0)
+    pub fn get_balance(env: Env, lender: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Balance(lender))
+            .unwrap_or(0)
     }
 
     fn check_admin(env: &Env) {

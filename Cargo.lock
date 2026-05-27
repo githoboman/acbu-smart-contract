@@ -35,6 +35,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "acbu_multisig"
+version = "0.1.0"
+dependencies = [
+ "shared",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "acbu_oracle"
 version = "0.1.0"
 dependencies = [
