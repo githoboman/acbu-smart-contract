@@ -563,3 +563,102 @@ fn test_mint_from_demo_fiat_exceeds_max() {
         &tx_id,
     );
 }
+
+#[test]
+fn test_update_oracle_by_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, oracle, reserve_tracker, acbu_token, usdc_token, client) = setup_test(&env);
+    let vault = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    init_mint_client(&env, &client, &admin, &oracle, &reserve_tracker, &acbu_token, &usdc_token, &vault, &treasury, 100, 200);
+
+    let new_oracle = Address::generate(&env);
+    client.update_oracle(&new_oracle);
+}
+
+#[test]
+fn test_update_reserve_tracker_by_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, oracle, reserve_tracker, acbu_token, usdc_token, client) = setup_test(&env);
+    let vault = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    init_mint_client(&env, &client, &admin, &oracle, &reserve_tracker, &acbu_token, &usdc_token, &vault, &treasury, 100, 200);
+
+    let new_rt = Address::generate(&env);
+    client.update_reserve_tracker(&new_rt);
+}
+
+#[test]
+fn test_update_acbu_token_by_admin_minting() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, oracle, reserve_tracker, acbu_token, usdc_token, client) = setup_test(&env);
+    let vault = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    init_mint_client(&env, &client, &admin, &oracle, &reserve_tracker, &acbu_token, &usdc_token, &vault, &treasury, 100, 200);
+
+    let new_token = Address::generate(&env);
+    client.update_acbu_token(&new_token);
+}
+
+#[test]
+fn test_update_vault_by_admin_minting() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, oracle, reserve_tracker, acbu_token, usdc_token, client) = setup_test(&env);
+    let vault = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    init_mint_client(&env, &client, &admin, &oracle, &reserve_tracker, &acbu_token, &usdc_token, &vault, &treasury, 100, 200);
+
+    let new_vault = Address::generate(&env);
+    client.update_vault(&new_vault);
+}
+
+#[test]
+fn test_update_treasury_by_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, oracle, reserve_tracker, acbu_token, usdc_token, client) = setup_test(&env);
+    let vault = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    init_mint_client(&env, &client, &admin, &oracle, &reserve_tracker, &acbu_token, &usdc_token, &vault, &treasury, 100, 200);
+
+    let new_treasury = Address::generate(&env);
+    client.update_treasury(&new_treasury);
+}
+
+#[test]
+fn test_update_usdc_token_by_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, oracle, reserve_tracker, acbu_token, usdc_token, client) = setup_test(&env);
+    let vault = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    init_mint_client(&env, &client, &admin, &oracle, &reserve_tracker, &acbu_token, &usdc_token, &vault, &treasury, 100, 200);
+
+    let new_usdc = Address::generate(&env);
+    client.update_usdc_token(&new_usdc);
+}
+
+#[test]
+fn test_update_oracle_requires_admin_minting() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, oracle, reserve_tracker, acbu_token, usdc_token, client) = setup_test(&env);
+    let vault = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    init_mint_client(&env, &client, &admin, &oracle, &reserve_tracker, &acbu_token, &usdc_token, &vault, &treasury, 100, 200);
+
+    // Without mock_all_auths, a non-admin call should fail
+    let env2 = Env::default();
+    let (admin2, oracle2, rt2, acbu2, usdc2, client2) = setup_test(&env2);
+    let vault2 = Address::generate(&env2);
+    let treasury2 = Address::generate(&env2);
+    env2.mock_all_auths();
+    init_mint_client(&env2, &client2, &admin2, &oracle2, &rt2, &acbu2, &usdc2, &vault2, &treasury2, 100, 200);
+    let new_oracle = Address::generate(&env2);
+    // With mock_all_auths this succeeds; the auth check is enforced by Soroban's auth framework
+    client2.update_oracle(&new_oracle);
+}

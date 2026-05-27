@@ -490,3 +490,20 @@ fn test_pause_without_initialize_returns_uninitialized_admin_error() {
     let result = client.try_pause();
     assert_eq!(result, Err(Ok(EscrowError::UninitializedAdmin)));
 }
+
+#[test]
+fn test_update_acbu_token_by_admin_escrow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let acbu_token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
+    let contract_id = env.register_contract(None, Escrow);
+    let client = EscrowClient::new(&env, &contract_id);
+    client.initialize(&admin, &acbu_token);
+
+    let new_token = Address::generate(&env);
+    client.update_acbu_token(&new_token);
+}

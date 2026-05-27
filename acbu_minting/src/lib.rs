@@ -940,6 +940,52 @@ impl MintingContract {
             .unwrap_or(false)
     }
 
+    // ── Dependency address updaters (admin only) ──────────────────────────
+
+    pub fn update_oracle(env: Env, new_oracle: Address) {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        admin.require_auth();
+        env.storage().instance().set(&DATA_KEY.oracle, &new_oracle);
+    }
+
+    pub fn update_reserve_tracker(env: Env, new_reserve_tracker: Address) {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.reserve_tracker, &new_reserve_tracker);
+    }
+
+    pub fn update_acbu_token(env: Env, new_acbu_token: Address) {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.acbu_token, &new_acbu_token);
+    }
+
+    pub fn update_vault(env: Env, new_vault: Address) {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        admin.require_auth();
+        env.storage().instance().set(&DATA_KEY.vault, &new_vault);
+    }
+
+    pub fn update_treasury(env: Env, new_treasury: Address) {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.treasury, &new_treasury);
+    }
+
+    pub fn update_usdc_token(env: Env, new_usdc_token: Address) {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.usdc_token, &new_usdc_token);
+    }
+
     fn check_paused(env: &Env) {
         let paused: bool = env
             .storage()

@@ -197,6 +197,22 @@ impl ReserveTrackerContract {
     }
 
     // -----------------------------------------------------------------------
+    // Dependency address updaters (admin only)
+    // -----------------------------------------------------------------------
+
+    pub fn update_oracle(env: Env, new_oracle: Address) {
+        Self::check_admin(&env);
+        env.storage().instance().set(&DATA_KEY.oracle, &new_oracle);
+    }
+
+    pub fn update_acbu_token(env: Env, new_acbu_token: Address) {
+        Self::check_admin(&env);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.acbu_token, &new_acbu_token);
+    }
+
+    // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
 

@@ -8,9 +8,6 @@ use shared::{
     calculate_deviation, median, CurrencyCode, DataKey as SharedDataKey, OutlierDetectionEvent,
     RateData, RateUpdateEvent, BASIS_POINTS, CONTRACT_VERSION, DECIMALS, EMERGENCY_THRESHOLD_BPS,
     MAX_VALIDATORS, OUTLIER_THRESHOLD_BPS, STALE_RATE_MAX_LEDGERS, UPDATE_INTERVAL_SECONDS,
-    calculate_deviation, median, CONTRACT_VERSION, CurrencyCode, DataKey as SharedDataKey, OutlierDetectionEvent, RateData, RateUpdateEvent,
-    BASIS_POINTS, DECIMALS, EMERGENCY_THRESHOLD_BPS, OUTLIER_THRESHOLD_BPS, STALE_RATE_MAX_LEDGERS,
-    UPDATE_INTERVAL_SECONDS,
 };
 
 mod shared {

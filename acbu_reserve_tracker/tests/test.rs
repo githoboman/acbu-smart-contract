@@ -43,3 +43,35 @@ fn verify_reserves_uses_passed_supply_not_contract_balance() {
     // Same reserves vs double the supply → insufficient
     assert!(!client.verify_reserves_manual(&(20 * 10_000_000)));
 }
+
+#[test]
+fn test_update_oracle_by_admin_reserve_tracker() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let oracle = env.register_contract(None, MockOracle);
+    let acbu_token = Address::generate(&env);
+
+    let contract_id = env.register_contract(None, ReserveTrackerContract);
+    let client = ReserveTrackerContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &oracle, &acbu_token, &10_000i128);
+
+    let new_oracle = Address::generate(&env);
+    client.update_oracle(&new_oracle);
+}
+
+#[test]
+fn test_update_acbu_token_by_admin_reserve_tracker() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let oracle = env.register_contract(None, MockOracle);
+    let acbu_token = Address::generate(&env);
+
+    let contract_id = env.register_contract(None, ReserveTrackerContract);
+    let client = ReserveTrackerContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &oracle, &acbu_token, &10_000i128);
+
+    let new_token = Address::generate(&env);
+    client.update_acbu_token(&new_token);
+}
