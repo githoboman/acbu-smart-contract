@@ -325,11 +325,23 @@ fn test_redeem_basket_multiple_calls() {
     let recipient = Address::generate(&env);
     let recipients = vec![&env, recipient.clone()];
 
+    // First redemption
     let amounts1 = ctx
         .burning
         .redeem_basket(&ctx.user, &recipients, &burn_amount);
-    assert!(amounts1.get(0).unwrap() > 0);
+    let out1 = amounts1.get(0).unwrap();
+    assert!(out1 > 0);
 
-    assert_eq!(st1.balance(&recipient), amounts1.get(0).unwrap());
-    assert_eq!(ctx.acbu_token.balance(&ctx.user), burn_amount);
+    // Second redemption
+    let amounts2 = ctx
+        .burning
+        .redeem_basket(&ctx.user, &recipients, &burn_amount);
+    let out2 = amounts2.get(0).unwrap();
+    assert!(out2 > 0);
+
+    // Total stoken received should equal sum of both redemptions
+    assert_eq!(st1.balance(&recipient), out1 + out2);
+
+    // User ACBU balance should be 0 after burning all
+    assert_eq!(ctx.acbu_token.balance(&ctx.user), 0);
 }
