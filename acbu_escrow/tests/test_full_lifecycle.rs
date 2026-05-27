@@ -1,9 +1,9 @@
 #![cfg(test)]
 
-use acbu_escrow::{Escrow, EscrowClient};
+use acbu_escrow::{Escrow, EscrowClient, EscrowError};
 use soroban_sdk::{
     testutils::{Address as _, MockAuth, MockAuthInvoke},
-    Address, Env, Error, IntoVal,
+    Address, Env, IntoVal,
 };
 
 #[test]
@@ -45,7 +45,7 @@ fn test_happy_path_create_fund_release() {
 
     // after release the escrow must no longer exist
     let result = client.try_release(&escrow_id, &payer);
-    assert!(result.is_err(), "release of non-existent escrow should fail");
+    assert!(result.is_err(), "Release of consumed escrow must fail");
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn test_admin_refund_on_dispute() {
 
     // after refund the escrow must no longer exist
     let result = client.try_refund(&escrow_id, &payer);
-    assert!(result.is_err(), "refund of non-existent escrow should fail");
+    assert!(result.is_err(), "Refund of consumed escrow must fail");
 }
 
 #[test]

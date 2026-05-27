@@ -365,3 +365,79 @@ fn test_redeem_basket_rejects_duplicate_recipients() {
     let result = client.try_redeem_basket(&user, &recipients, &(100 * DECIMALS));
     assert!(result.is_err());
 }
+
+#[test]
+fn test_update_oracle_by_admin_burning() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let oracle = env.register_contract(None, oracle_mock::MockOracle);
+    let reserve_tracker = env.register_contract(None, oracle_mock::MockReserveTracker);
+    let acbu_token = env.register_contract(None, oracle_mock::MockToken);
+    let vault = admin.clone();
+    let withdrawal_processor = Address::generate(&env);
+
+    let contract_id = env.register_contract(None, BurningContract);
+    let client = BurningContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &oracle, &reserve_tracker, &acbu_token, &withdrawal_processor, &vault, &100, &150);
+
+    let new_oracle = Address::generate(&env);
+    client.update_oracle(&new_oracle);
+}
+
+#[test]
+fn test_update_reserve_tracker_by_admin_burning() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let oracle = env.register_contract(None, oracle_mock::MockOracle);
+    let reserve_tracker = env.register_contract(None, oracle_mock::MockReserveTracker);
+    let acbu_token = env.register_contract(None, oracle_mock::MockToken);
+    let vault = admin.clone();
+    let withdrawal_processor = Address::generate(&env);
+
+    let contract_id = env.register_contract(None, BurningContract);
+    let client = BurningContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &oracle, &reserve_tracker, &acbu_token, &withdrawal_processor, &vault, &100, &150);
+
+    let new_rt = Address::generate(&env);
+    client.update_reserve_tracker(&new_rt);
+}
+
+#[test]
+fn test_update_acbu_token_by_admin_burning() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let oracle = env.register_contract(None, oracle_mock::MockOracle);
+    let reserve_tracker = env.register_contract(None, oracle_mock::MockReserveTracker);
+    let acbu_token = env.register_contract(None, oracle_mock::MockToken);
+    let vault = admin.clone();
+    let withdrawal_processor = Address::generate(&env);
+
+    let contract_id = env.register_contract(None, BurningContract);
+    let client = BurningContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &oracle, &reserve_tracker, &acbu_token, &withdrawal_processor, &vault, &100, &150);
+
+    let new_token = Address::generate(&env);
+    client.update_acbu_token(&new_token);
+}
+
+#[test]
+fn test_update_vault_by_admin_burning() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let oracle = env.register_contract(None, oracle_mock::MockOracle);
+    let reserve_tracker = env.register_contract(None, oracle_mock::MockReserveTracker);
+    let acbu_token = env.register_contract(None, oracle_mock::MockToken);
+    let vault = admin.clone();
+    let withdrawal_processor = Address::generate(&env);
+
+    let contract_id = env.register_contract(None, BurningContract);
+    let client = BurningContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &oracle, &reserve_tracker, &acbu_token, &withdrawal_processor, &vault, &100, &150);
+
+    let new_vault = Address::generate(&env);
+    client.update_vault(&new_vault);
+}

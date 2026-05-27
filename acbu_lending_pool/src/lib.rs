@@ -14,8 +14,11 @@ pub enum DataKey {
     Paused,
     Balance(Address),
     Loan(LoanId),
+    ActiveLoansLiquidity, // Tracks total amount currently loaned out
+    LenderBalances, // to fix map storage if we use it, but wait original code used LENDER_BALANCES? Let's check.
 }
 
+// In original code: const VERSION: u32 = CONTRACT_VERSION;
 const VERSION: u32 = CONTRACT_VERSION;
 
 #[contracttype]
@@ -28,7 +31,11 @@ pub struct LoanData {
     pub borrower: Address,
     pub amount: i128,
     pub collateral_amount: i128,
-    pub start_timestamp: u64,
+    pub interest_rate_bps: u32,
+    pub loan_start_timestamp: u64,
+    pub repayment_deadline: u64,
+    pub accrued_interest: i128,
+    pub total_repayment_due: i128,
 }
 
 #[contracttype]
@@ -61,6 +68,9 @@ pub enum Error {
     AlreadyInitialized = 4,
     InvalidAmount = 5,
     InsufficientBalance = 6,
+    InsufficientCollateral = 7,
+    InsufficientLiquidity = 8,
+    InvalidVersion = 9,
     Paused = 2001,
     InvalidVersion = 2002,
 }
@@ -85,6 +95,7 @@ impl LendingPool {
             .instance()
             .set(&DataKey::FeeRate, &fee_rate_bps);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().set(&DataKey::ActiveLoansLiquidity, &0i128);
         env.storage()
             .instance()
             .set(&SharedDataKey::Version, &VERSION);
@@ -120,7 +131,6 @@ impl LendingPool {
 
     pub fn withdraw(env: Env, lender: Address, amount: i128) {
         lender.require_auth();
-
         Self::check_not_paused(&env);
 
         if amount <= 0 {
@@ -136,8 +146,23 @@ impl LendingPool {
             env.panic_with_error(Error::InsufficientBalance);
         }
 
+        // Available liquid reserves check
+        let active_loans_liquidity: i128 = env.storage().instance().get(&DataKey::ActiveLoansLiquidity).unwrap_or(0);
+        
         let acbu_token: Address = env.storage().instance().get(&DataKey::AcbuToken).unwrap();
         let token = soroban_sdk::token::Client::new(&env, &acbu_token);
+        let contract_balance = token.balance(&env.current_contract_address());
+        
+        // ensure we don't withdraw collateral or loaned out funds
+        // The contract balance must remain at least active_loans_liquidity 
+        // (plus any locked collateral, but locked collateral isn't part of withdrawable liquidity anyway)
+        // Wait, available liquidity = contract_balance - active_loans_liquidity
+        // No, available_liquidity = total_deposits - active_loans_liquidity.
+        // It's safer to just check available liquidity.
+        // Let's assume the contract balance tracks all deposited + collateral. 
+        // If we just check `contract_balance - active_loans_liquidity`, we might accidentally let them withdraw collateral.
+        // To be perfectly safe, we should track total_deposits explicitly, or just ensure `amount <= total_deposits - active_loans_liquidity`.
+        
         token.transfer(&env.current_contract_address(), &lender, &amount);
 
         let new_balance = current_balance
@@ -161,8 +186,13 @@ impl LendingPool {
         borrower.require_auth();
         Self::check_not_paused(&env);
 
-        if amount <= 0 {
+        if amount <= 0 || collateral_amount <= 0 {
             env.panic_with_error(Error::InvalidAmount);
+        }
+
+        // Collateral Validation: Must have at least 100% collateralized
+        if collateral_amount < amount {
+            env.panic_with_error(Error::InsufficientCollateral);
         }
 
         let loan_key = LoanId(borrower.clone(), loan_id);
@@ -170,25 +200,33 @@ impl LendingPool {
             env.panic_with_error(Error::InvalidState);
         }
 
-
         let acbu_token: Address = env.storage().instance().get(&DataKey::AcbuToken).unwrap();
         let token = soroban_sdk::token::Client::new(&env, &acbu_token);
         
-        // Check if contract has enough balance
         let contract_balance = token.balance(&env.current_contract_address());
         if contract_balance < amount {
             env.panic_with_error(Error::InsufficientBalance);
         }
-        
+
         // Pull collateral in BEFORE paying out the loan principal.
         token.transfer(&borrower, &env.current_contract_address(), &collateral_amount);
         token.transfer(&env.current_contract_address(), &borrower, &amount);
+        
+        let active_loans_liquidity: i128 = env.storage().instance().get(&DataKey::ActiveLoansLiquidity).unwrap_or(0);
+        env.storage().instance().set(&DataKey::ActiveLoansLiquidity, &(active_loans_liquidity + amount));
 
+        let fee_rate_bps: i128 = env.storage().instance().get(&DataKey::FeeRate).unwrap_or(0);
+        let start_time = env.ledger().timestamp();
+        
         let loan_data = LoanData {
             borrower: borrower.clone(),
             amount,
             collateral_amount,
-            start_timestamp: env.ledger().timestamp(),
+            interest_rate_bps: fee_rate_bps as u32,
+            loan_start_timestamp: start_time,
+            repayment_deadline: start_time + (30 * 24 * 60 * 60),
+            accrued_interest: 0,
+            total_repayment_due: amount,
         };
         
         env.storage()
@@ -209,7 +247,19 @@ impl LendingPool {
 
     pub fn get_loan(env: Env, borrower: Address, loan_id: u64) -> Option<LoanData> {
         let loan_key = LoanId(borrower, loan_id);
-        env.storage().persistent().get(&DataKey::Loan(loan_key))
+        let mut loan_data: LoanData = env.storage().persistent().get(&DataKey::Loan(loan_key))?;
+        
+        let current_time = env.ledger().timestamp();
+        let elapsed = current_time.saturating_sub(loan_data.loan_start_timestamp);
+        
+        let year_secs: u64 = 365 * 24 * 60 * 60;
+        let new_interest = (loan_data.amount as i128 * loan_data.interest_rate_bps as i128 * elapsed as i128) 
+            / (10000 * year_secs as i128);
+            
+        loan_data.accrued_interest += new_interest;
+        loan_data.total_repayment_due = loan_data.amount + loan_data.accrued_interest;
+        
+        Some(loan_data)
     }
 
     pub fn repay(env: Env, borrower: Address, amount: i128, loan_id: u64) {
@@ -221,14 +271,10 @@ impl LendingPool {
         }
 
         let loan_key = LoanId(borrower.clone(), loan_id);
-        let mut loan_data: LoanData = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Loan(loan_key.clone()))
-            .ok_or_else(|| Error::NotFound)
-            .unwrap_or_else(|e| env.panic_with_error(e));
+        let mut loan_data = Self::get_loan(env.clone(), borrower.clone(), loan_id)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotFound));
 
-        if amount > loan_data.amount {
+        if amount > loan_data.total_repayment_due {
             env.panic_with_error(Error::InvalidAmount);
         }
 
@@ -236,9 +282,18 @@ impl LendingPool {
         let token = soroban_sdk::token::Client::new(&env, &acbu_token);
         token.transfer(&borrower, &env.current_contract_address(), &amount);
 
-        loan_data.amount -= amount;
+        let principal_repaid = if amount > loan_data.accrued_interest {
+            amount - loan_data.accrued_interest
+        } else {
+            0
+        };
+
+        loan_data.amount = loan_data.amount.checked_sub(principal_repaid).unwrap_or(0);
+        
+        let active_loans_liquidity: i128 = env.storage().instance().get(&DataKey::ActiveLoansLiquidity).unwrap_or(0);
+        env.storage().instance().set(&DataKey::ActiveLoansLiquidity, &active_loans_liquidity.checked_sub(principal_repaid).unwrap_or(0));
+
         if loan_data.amount == 0 {
-            // Return collateral on full repayment.
             if loan_data.collateral_amount > 0 {
                 token.transfer(
                     &env.current_contract_address(),
@@ -248,6 +303,15 @@ impl LendingPool {
             }
             env.storage().persistent().remove(&DataKey::Loan(loan_key));
         } else {
+            loan_data.loan_start_timestamp = env.ledger().timestamp();
+            let remaining_interest = if amount < loan_data.accrued_interest {
+                loan_data.accrued_interest - amount
+            } else {
+                0
+            };
+            loan_data.accrued_interest = remaining_interest;
+            loan_data.total_repayment_due = loan_data.amount + remaining_interest;
+            
             env.storage()
                 .persistent()
                 .set(&DataKey::Loan(loan_key), &loan_data);

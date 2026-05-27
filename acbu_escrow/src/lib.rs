@@ -250,6 +250,15 @@ impl Escrow {
         Ok(())
     }
 
+    pub fn update_acbu_token(env: Env, new_acbu_token: Address) -> Result<(), EscrowError> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.acbu_token, &new_acbu_token);
+        Ok(())
+    }
+
     pub fn version(env: Env) -> u32 {
         env.storage()
             .instance()

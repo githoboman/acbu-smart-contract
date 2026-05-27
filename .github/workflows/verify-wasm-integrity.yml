@@ -34,6 +34,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Fetch token WASM artifact
+        run: bash scripts/fetch_token_wasm.sh
+
       - name: Verify WASM artifact hash
         run: |
           WASM_FILE="soroban_token_contract.wasm"
@@ -123,6 +126,9 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Fetch token WASM artifact
+        run: bash scripts/fetch_token_wasm.sh
+
       - name: Run WASM verification script
         run: bash scripts/verify_wasm_hash.sh
 
@@ -189,6 +195,9 @@ jobs:
             exit 1
           fi
           echo "✅ Cargo.lock present"
+
+      - name: Fetch token WASM artifact
+        run: bash scripts/fetch_token_wasm.sh
 
       - name: Build with --locked (native, all workspace crates)
         run: cargo build --locked --workspace

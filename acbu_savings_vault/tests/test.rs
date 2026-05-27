@@ -382,3 +382,20 @@ fn test_deposit_event_has_fee_fields() {
     assert_eq!(deposit_event.fee_amount, 300_000);
     assert_eq!(deposit_event.net_amount, 9_700_000);
 }
+
+#[test]
+fn test_update_acbu_token_by_admin_savings_vault() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let acbu_token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
+    let contract_id = env.register_contract(None, SavingsVault);
+    let client = SavingsVaultClient::new(&env, &contract_id);
+    client.initialize(&admin, &acbu_token, &100, &500);
+
+    let new_token = Address::generate(&env);
+    client.update_acbu_token(&new_token);
+}
