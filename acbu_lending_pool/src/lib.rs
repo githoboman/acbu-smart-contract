@@ -1,7 +1,6 @@
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol,
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
 };
 
 use shared::{DataKey as SharedDataKey, BASIS_POINTS, CONTRACT_VERSION};
@@ -271,7 +270,7 @@ impl LendingPool {
         let fee_rate: i128 = env
             .storage()
             .instance()
-            .get(&DATA_KEY.fee_rate)
+            .get(&DataKey::FeeRate)
             .unwrap_or(0);
 
         env.events().publish(
@@ -279,7 +278,6 @@ impl LendingPool {
             BorrowEvent {
                 creator: borrower,
                 amount,
-                token: acbu.clone(),
                 token: acbu_token,
                 loan_id,
                 timestamp,
