@@ -72,6 +72,7 @@ pub enum Error {
     InsufficientLiquidity = 8,
     InvalidVersion = 9,
     Paused = 2001,
+    InvalidVersion = 2002,
 }
 
 #[contract]
@@ -177,13 +178,6 @@ impl LendingPool {
 
         env.events()
             .publish((symbol_short!("withdraw"), lender), amount);
-    }
-
-    pub fn get_balance(env: Env, lender: Address) -> i128 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Balance(lender))
-            .unwrap_or(0)
     }
 
     pub fn borrow(
@@ -386,6 +380,13 @@ impl LendingPool {
         env.storage()
             .instance()
             .set(&SharedDataKey::Version, &new_version);
+    }
+
+    pub fn get_balance(env: Env, lender: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Balance(lender))
+            .unwrap_or(0)
     }
 
     fn check_admin(env: &Env) {

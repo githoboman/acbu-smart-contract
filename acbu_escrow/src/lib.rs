@@ -3,6 +3,8 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol,
 };
 
+use shared::{DataKey as SharedDataKey, CONTRACT_VERSION};
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -19,21 +21,17 @@ pub enum EscrowError {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DataKey {
+pub struct EscrowDataKey {
     pub admin: Symbol,
     pub acbu_token: Symbol,
     pub paused: Symbol,
-    pub version: Symbol,
 }
 
-const DATA_KEY: DataKey = DataKey {
+const DATA_KEY: EscrowDataKey = EscrowDataKey {
     admin: symbol_short!("ADMIN"),
     acbu_token: symbol_short!("ACBU_TKN"),
     paused: symbol_short!("PAUSED"),
-    version: symbol_short!("VERSION"),
 };
-
-const VERSION: u32 = 1;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -96,7 +94,9 @@ impl Escrow {
             .instance()
             .set(&DATA_KEY.acbu_token, &acbu_token);
         env.storage().instance().set(&DATA_KEY.paused, &false);
-        env.storage().instance().set(&DATA_KEY.version, &VERSION);
+        env.storage()
+            .instance()
+            .set(&SharedDataKey::Version, &CONTRACT_VERSION);
     }
 
     /// Create escrow: payer deposits ACBU, payee can claim after release
@@ -259,8 +259,11 @@ impl Escrow {
         Ok(())
     }
 
-    pub fn version(_env: Env) -> u32 {
-        VERSION
+    pub fn version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&SharedDataKey::Version)
+            .unwrap_or(0)
     }
 
     pub fn migrate(env: Env) {
@@ -271,12 +274,16 @@ impl Escrow {
             .unwrap_or_else(|| env.panic_with_error(EscrowError::UninitializedAdmin));
         admin.require_auth();
 
-        let current_version = VERSION;
-        let stored_version: u32 = env.storage().instance().get(&DATA_KEY.version).unwrap_or(0);
+        let current_version = CONTRACT_VERSION;
+        let stored_version: u32 = env
+            .storage()
+            .instance()
+            .get(&SharedDataKey::Version)
+            .unwrap_or(0);
         if stored_version < current_version {
             env.storage()
                 .instance()
-                .set(&DATA_KEY.version, &current_version);
+                .set(&SharedDataKey::Version, &current_version);
         }
     }
 

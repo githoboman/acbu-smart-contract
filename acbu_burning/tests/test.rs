@@ -237,7 +237,9 @@ fn test_redeem_basket_requires_vault_allowance() {
     );
 
     let burn_amt = 100 * DECIMALS;
-    client.redeem_basket(&user, &recipient, &burn_amt);
+    let mut recipients = Vec::new(&env);
+    recipients.push_back(recipient);
+    client.redeem_basket(&user, &recipients, &burn_amt);
 }
 
 #[test]
