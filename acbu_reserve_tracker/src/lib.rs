@@ -16,6 +16,7 @@ mod shared {
 pub enum ReserveTrackerError {
     AlreadyInitialized = 8001,
     InvalidVersion = 8002,
+    Unknown = 8999,
 }
 
 #[contracttype]

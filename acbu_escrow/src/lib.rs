@@ -19,6 +19,7 @@ pub enum EscrowError {
     AlreadyInitialized = 3008,
     TimelockNotElapsed = 3009,
     NoPendingUpgrade = 3010,
+    Unknown = 3999,
 }
 
 #[contracttype]

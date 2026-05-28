@@ -90,6 +90,7 @@ pub enum MintingError {
     FintechTxIdTooLong = 5016,
     FintechTxIdInvalidChar = 5017,
     InvalidVersion = 5018,
+    Unknown = 5999,
 }
 
 #[contract]
