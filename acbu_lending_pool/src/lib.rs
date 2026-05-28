@@ -15,11 +15,14 @@ pub enum DataKey {
     Balance(Address),
     Loan(LoanId),
     ActiveLoansLiquidity, // Tracks total amount currently loaned out
-    LenderBalances, // to fix map storage if we use it, but wait original code used LENDER_BALANCES? Let's check.
+    LenderBalances,
+    PendingUpgradeWasm,
+    PendingUpgradeVersion,
+    PendingUpgradeEligibleAt,
 }
 
-// In original code: const VERSION: u32 = CONTRACT_VERSION;
 const VERSION: u32 = CONTRACT_VERSION;
+const UPGRADE_TIMELOCK_SECONDS: u64 = 86_400;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -70,9 +73,10 @@ pub enum Error {
     InsufficientBalance = 6,
     InsufficientCollateral = 7,
     InsufficientLiquidity = 8,
-    InvalidVersion = 9,
     Paused = 2001,
     InvalidVersion = 2002,
+    TimelockNotElapsed = 2003,
+    NoPendingUpgrade = 2004,
 }
 
 #[contract]
@@ -339,11 +343,9 @@ impl LendingPool {
         env.storage().instance().set(&DataKey::Paused, &false);
     }
 
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>, new_version: u32) {
+    pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>, new_version: u32) {
         Self::check_admin(&env);
-        Self::check_not_paused(&env);
-
-        let current_version = env
+        let current_version: u32 = env
             .storage()
             .instance()
             .get(&SharedDataKey::Version)
@@ -351,9 +353,53 @@ impl LendingPool {
         if new_version <= current_version {
             env.panic_with_error(Error::InvalidVersion);
         }
+        let eligible_at = env.ledger().timestamp() + UPGRADE_TIMELOCK_SECONDS;
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgradeWasm, &new_wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgradeVersion, &new_version);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgradeEligibleAt, &eligible_at);
+    }
 
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-
+    pub fn execute_upgrade(env: Env) {
+        Self::check_admin(&env);
+        let wasm_hash: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgradeWasm)
+            .unwrap_or_else(|| env.panic_with_error(Error::NoPendingUpgrade));
+        let new_version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgradeVersion)
+            .unwrap_or_else(|| env.panic_with_error(Error::NoPendingUpgrade));
+        let eligible_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgradeEligibleAt)
+            .unwrap_or(u64::MAX);
+        if env.ledger().timestamp() < eligible_at {
+            env.panic_with_error(Error::TimelockNotElapsed);
+        }
+        let current_version: u32 = env
+            .storage()
+            .instance()
+            .get(&SharedDataKey::Version)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeWasm);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeVersion);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeEligibleAt);
+        env.deployer().update_current_contract_wasm(wasm_hash);
         #[allow(clippy::single_match)]
         for v in current_version..new_version {
             match v {
@@ -361,10 +407,22 @@ impl LendingPool {
                 _ => {}
             }
         }
-
         env.storage()
             .instance()
             .set(&SharedDataKey::Version, &new_version);
+    }
+
+    pub fn cancel_upgrade(env: Env) {
+        Self::check_admin(&env);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeWasm);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeVersion);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeEligibleAt);
     }
 
     pub fn get_balance(env: Env, lender: Address) -> i128 {

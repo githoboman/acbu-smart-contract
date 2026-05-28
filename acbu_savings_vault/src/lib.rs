@@ -32,6 +32,8 @@ pub enum Error {
     NoYieldRate = 1014,
     ZeroNetDeposit = 1015,
     InvalidVersion = 1016,
+    TimelockNotElapsed = 1017,
+    NoPendingUpgrade = 1018,
 }
 
 // ---------------------------------------------------------------------------
@@ -45,6 +47,9 @@ pub struct DataKey {
     pub fee_rate: Symbol,
     pub yield_rate: Symbol,
     pub paused: Symbol,
+    pub pending_upgrade_wasm: Symbol,
+    pub pending_upgrade_version: Symbol,
+    pub pending_upgrade_eligible_at: Symbol,
 }
 
 const DATA_KEY: DataKey = DataKey {
@@ -53,10 +58,14 @@ const DATA_KEY: DataKey = DataKey {
     fee_rate: symbol_short!("FEE_RATE"),
     yield_rate: symbol_short!("YLD_RATE"),
     paused: symbol_short!("PAUSED"),
+    pending_upgrade_wasm: symbol_short!("PU_WASM"),
+    pending_upgrade_version: symbol_short!("PU_VER"),
+    pending_upgrade_eligible_at: symbol_short!("PU_ETA"),
 };
 
 const DEPOSIT_KEY: Symbol = symbol_short!("DEPOSITS");
 const SECONDS_PER_YEAR: i128 = 31_536_000;
+const UPGRADE_TIMELOCK_SECONDS: u64 = 86_400;
 // CONTRACT_VERSION is imported from shared
 
 // ---------------------------------------------------------------------------
@@ -413,15 +422,10 @@ impl SavingsVault {
             .set(&DATA_KEY.acbu_token, &new_acbu_token);
     }
 
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>, new_version: u32) {
+    pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>, new_version: u32) {
         let admin = Self::load_admin(&env).unwrap_or_else(|e| env.panic_with_error(e));
         admin.require_auth();
-
-        if Self::is_paused(&env) {
-            env.panic_with_error(Error::Paused);
-        }
-
-        let current_version = env
+        let current_version: u32 = env
             .storage()
             .instance()
             .get(&SharedDataKey::Version)
@@ -429,20 +433,77 @@ impl SavingsVault {
         if new_version <= current_version {
             env.panic_with_error(Error::InvalidVersion);
         }
+        let eligible_at = env.ledger().timestamp() + UPGRADE_TIMELOCK_SECONDS;
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.pending_upgrade_wasm, &new_wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.pending_upgrade_version, &new_version);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.pending_upgrade_eligible_at, &eligible_at);
+    }
 
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-
-        // Run migrations
+    pub fn execute_upgrade(env: Env) {
+        let admin = Self::load_admin(&env).unwrap_or_else(|e| env.panic_with_error(e));
+        admin.require_auth();
+        let wasm_hash: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.pending_upgrade_wasm)
+            .unwrap_or_else(|| env.panic_with_error(Error::NoPendingUpgrade));
+        let new_version: u32 = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.pending_upgrade_version)
+            .unwrap_or_else(|| env.panic_with_error(Error::NoPendingUpgrade));
+        let eligible_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.pending_upgrade_eligible_at)
+            .unwrap_or(u64::MAX);
+        if env.ledger().timestamp() < eligible_at {
+            env.panic_with_error(Error::TimelockNotElapsed);
+        }
+        let current_version: u32 = env
+            .storage()
+            .instance()
+            .get(&SharedDataKey::Version)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_upgrade_wasm);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_upgrade_version);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_upgrade_eligible_at);
+        env.deployer().update_current_contract_wasm(wasm_hash);
         for v in current_version..new_version {
             match v {
                 0 => Self::migrate_v0_to_v1(env.clone()),
                 _ => {}
             }
         }
-
         env.storage()
             .instance()
             .set(&SharedDataKey::Version, &new_version);
+    }
+
+    pub fn cancel_upgrade(env: Env) {
+        let admin = Self::load_admin(&env).unwrap_or_else(|e| env.panic_with_error(e));
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_upgrade_wasm);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_upgrade_version);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_upgrade_eligible_at);
     }
 
     fn migrate_v0_to_v1(_env: Env) {
