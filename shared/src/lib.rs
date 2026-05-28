@@ -1,11 +1,79 @@
 #![no_std]
 
-use soroban_sdk::{contracttype, Address, String as SorobanString, Vec};
+use soroban_sdk::{contracterror, contracttype, Address, String as SorobanString, Vec};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Version,
+}
+
+// ---------------------------------------------------------------------------
+// C-043 — Emergency multisig for admin operations
+//
+// These shared types are used by the `acbu_multisig` contract and referenced
+// by every contract that delegates admin authority to a multisig address.
+//
+// Design:
+//   • A separate `MultisigContract` holds the signer list and threshold.
+//   • Each protected contract stores the multisig contract address as its
+//     "admin".  Admin-only functions call `admin.require_auth()` as before —
+//     Soroban's auth tree propagates the M-of-N approval automatically when
+//     the multisig contract is the invoker.
+//   • The multisig contract exposes `propose` / `approve` / `execute` so that
+//     M signers must independently authorise before any admin action fires.
+// ---------------------------------------------------------------------------
+
+/// On-chain proposal stored inside the multisig contract.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AdminProposal {
+    /// Arbitrary tag identifying the intended action (e.g. "pause", "upgrade").
+    pub action_tag: SorobanString,
+    /// Addresses that have already approved this proposal.
+    pub approvals: Vec<Address>,
+    /// Whether the proposal has been executed.
+    pub executed: bool,
+    /// Ledger timestamp after which the proposal expires and can no longer be executed.
+    pub expires_at: u64,
+}
+
+/// Multisig configuration stored inside the multisig contract.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MultisigConfig {
+    /// Ordered list of authorised signers.
+    pub signers: Vec<Address>,
+    /// Minimum number of approvals required to execute a proposal.
+    pub threshold: u32,
+}
+
+/// Event emitted when a new proposal is created.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProposalCreatedEvent {
+    pub proposal_id: u64,
+    pub proposer: Address,
+    pub action_tag: SorobanString,
+    pub expires_at: u64,
+}
+
+/// Event emitted when a signer approves a proposal.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProposalApprovedEvent {
+    pub proposal_id: u64,
+    pub approver: Address,
+    pub approval_count: u32,
+}
+
+/// Event emitted when a proposal reaches threshold and is executed.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProposalExecutedEvent {
+    pub proposal_id: u64,
+    pub action_tag: SorobanString,
+    pub executed_by: Address,
 }
 
 pub const CONTRACT_VERSION: u32 = 1;
@@ -31,6 +99,9 @@ pub struct RateData {
     pub rate_usd: i128, // Rate in 7 decimals (e.g., 0.0012345 = 12345)
     pub timestamp: u64,
     pub sources: soroban_sdk::Vec<i128>, // Source rates for median calculation
+    /// Ledger sequence number at which this rate was written.
+    /// Used for ledger-based staleness checks (unforgeable — set by the network).
+    pub ledger: u32,
 }
 
 /// Reserve data structure
@@ -108,7 +179,7 @@ pub struct RateUpdateEvent {
     pub currency: CurrencyCode,
     pub rate: i128,
     pub timestamp: u64,
-    pub validators: soroban_sdk::Vec<Address>,
+    pub validator: Address,
 }
 
 /// Outlier detection event data
@@ -122,23 +193,26 @@ pub struct OutlierDetectionEvent {
     pub timestamp: u64,
 }
 
-/// Error types
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Error types for the **burning** contract (and any crate that re-uses this enum).
+///
+/// Numeric codes are stable for client UX; see `docs/ERROR_CODES.md` in the workspace root.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
 pub enum ContractError {
-    Unauthorized,
-    Paused,
-    InvalidAmount,
-    InvalidRate,
-    InsufficientReserves,
-    RateLimitExceeded,
-    InvalidCurrency,
-    OracleError,
-    ReserveError,
-    InsufficientBalance,
-    /// Recipient address is a contract, not a Stellar account.
-    /// Minting to a contract-only address would strand funds permanently.
-    InvalidRecipient,
+    Unauthorized = 1,
+    Paused = 2,
+    InvalidAmount = 3,
+    InvalidRate = 4,
+    InsufficientReserves = 5,
+    RateLimitExceeded = 6,
+    InvalidCurrency = 7,
+    OracleError = 8,
+    ReserveError = 9,
+    InsufficientBalance = 10,
+    InvalidRecipient = 11,
+    /// WASM upgrade rejected: `new_version` must be greater than the stored version.
+    InvalidVersion = 12,
 }
 
 /// Cross-contract method name constants — prevents silent logic splits from typos
@@ -161,6 +235,12 @@ pub const MIN_BURN_AMOUNT: i128 = 10_000_000; // 10 ACBU (7 decimals)
 pub const UPDATE_INTERVAL_SECONDS: u64 = 21_600; // 6 hours
 pub const EMERGENCY_THRESHOLD_BPS: i128 = 500; // 5% deviation threshold
 pub const OUTLIER_THRESHOLD_BPS: i128 = 300; // 3% deviation for outlier detection
+pub const MAX_VALIDATORS: u32 = 50; // Maximum number of validators to prevent gas griefing
+/// Maximum ledger age of a stored rate before it is considered stale and rejected
+/// at read time. Stellar closes ~1 ledger every 5 seconds; 720 ledgers ≈ 1 hour.
+/// Rates must be refreshed within this window or consumers (minting) will be blocked.
+/// Admin can bypass via `set_rate_admin` for emergency overrides.
+pub const STALE_RATE_MAX_LEDGERS: u32 = 4_320; // ~6 hours at 5 s/ledger
 
 /// Utility functions
 pub fn calculate_fee(amount: i128, fee_rate_bps: i128) -> i128 {
@@ -188,15 +268,15 @@ pub fn median(mut values: soroban_sdk::Vec<i128>) -> Option<i128> {
 
     if n % 2 == 0 {
         // For even count, find two middle elements and average them
-        let _ = quickselect_inplace(&mut values, 0, (n - 1) as i32, (mid - 1) as i32);
-        let val1 = values.get((mid - 1) as u32)?;
-        let _ = quickselect_inplace(&mut values, 0, (n - 1) as i32, mid as i32);
-        let val2 = values.get(mid as u32)?;
+        quickselect_inplace(&mut values, 0, (n - 1) as i32, (mid - 1) as i32);
+        let val1 = values.get(mid - 1)?;
+        quickselect_inplace(&mut values, 0, (n - 1) as i32, mid as i32);
+        let val2 = values.get(mid)?;
         Some((val1 + val2) / 2)
     } else {
         // For odd count, find the middle element
-        let _ = quickselect_inplace(&mut values, 0, (n - 1) as i32, mid as i32);
-        Some(values.get(mid as u32)?)
+        quickselect_inplace(&mut values, 0, (n - 1) as i32, mid as i32);
+        Some(values.get(mid)?)
     }
 }
 
@@ -247,9 +327,13 @@ pub fn calculate_deviation(value1: i128, value2: i128) -> i128 {
         return i128::MAX;
     }
     let diff = if value1 > value2 {
-        value1.checked_sub(value2).expect("Underflow in deviation diff")
+        value1
+            .checked_sub(value2)
+            .expect("Underflow in deviation diff")
     } else {
-        value2.checked_sub(value1).expect("Underflow in deviation diff")
+        value2
+            .checked_sub(value1)
+            .expect("Underflow in deviation diff")
     };
     (diff * BASIS_POINTS) / value2
 }

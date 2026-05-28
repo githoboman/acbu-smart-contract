@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, vec, Address, BytesN, Env, IntoVal,
-    String as SorobanString, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, vec, Address, BytesN, Env,
+    IntoVal, String as SorobanString, Symbol, Vec,
 };
 
 use shared::{
@@ -9,13 +9,15 @@ use shared::{
     CONTRACT_VERSION, DECIMALS, MIN_BURN_AMOUNT,
     ORACLE_GET_ACBU_RATE, ORACLE_GET_CURRENCIES, ORACLE_GET_BASKET_WEIGHT,
     ORACLE_GET_RATE, ORACLE_GET_S_TOKEN_ADDR,
+    calculate_fee, BurnEvent, ContractError, CurrencyCode, DataKey as SharedDataKey, BASIS_POINTS,
+    DECIMALS, MIN_BURN_AMOUNT, UPDATE_INTERVAL_SECONDS,
 };
 
 #[allow(dead_code)]
 pub mod token_contract {
     soroban_sdk::contractimport!(
         file = "../soroban_token_contract.wasm",
-        sha256 = "6b14997b915dee21082884cd5a2f1f2f0aef0073d1dcb9c5b3c674cf487fb41d"
+        sha256 = "d97a3e83c3523504e4ae1dc74b89fcaee443f77ac6c88744d0b28f963571aac5"
     );
 }
 
@@ -55,7 +57,8 @@ pub struct BurningContract;
 #[contractimpl]
 impl BurningContract {
     /// Initialize the burning contract.
-    /// `vault` holds Afreum S-tokens (must have approved this contract for `transfer_from`).
+    /// `vault` holds Afreum S-tokens. Redemption flows use a pull model:
+    /// the vault must approve this contract for `transfer_from` on each S-token.
     /// `fee_rate_bps` applies to full basket redemption; `fee_single_redeem_bps` to single-currency payout (typically higher).
     pub fn initialize(
         env: Env,
@@ -69,13 +72,13 @@ impl BurningContract {
         fee_single_redeem_bps: i128,
     ) {
         if env.storage().instance().has(&DATA_KEY.admin) {
-            panic!("Contract already initialized");
+            env.panic_with_error(ContractError::Unauthorized);
         }
 
         if !(0..=BASIS_POINTS).contains(&fee_rate_bps)
             || !(0..=BASIS_POINTS).contains(&fee_single_redeem_bps)
         {
-            panic!("Invalid fee rate");
+            env.panic_with_error(ContractError::InvalidRate);
         }
 
         env.storage().instance().set(&DATA_KEY.admin, &admin);
@@ -96,13 +99,11 @@ impl BurningContract {
         env.storage()
             .instance()
             .set(&DATA_KEY.fee_single_redeem, &fee_single_redeem_bps);
+        env.storage().instance().set(&SharedDataKey::Version, &2u32);
         env.storage().instance().set(&DATA_KEY.paused, &false);
         env.storage()
             .instance()
             .set(&DATA_KEY.min_burn_amount, &MIN_BURN_AMOUNT);
-        env.storage()
-            .instance()
-            .set(&SharedDataKey::Version, &CONTRACT_VERSION);
     }
 
     /// Redeem ACBU for a single Afreum S-token (higher fee tier). Requires vault approval.
@@ -122,30 +123,47 @@ impl BurningContract {
             .get(&DATA_KEY.min_burn_amount)
             .unwrap();
         if acbu_amount < min_amount {
-            panic!("Invalid burn amount");
+            env.panic_with_error(ContractError::InvalidAmount);
         }
 
-        let acbu_token: Address = env.storage().instance().get(&DATA_KEY.acbu_token).unwrap();
         let oracle_addr: Address = env.storage().instance().get(&DATA_KEY.oracle).unwrap();
         let vault: Address = env.storage().instance().get(&DATA_KEY.vault).unwrap();
+        let acbu_token: Address = env.storage().instance().get(&DATA_KEY.acbu_token).unwrap();
         let fee_single: i128 = env
             .storage()
             .instance()
             .get(&DATA_KEY.fee_single_redeem)
             .unwrap();
+        let reserve_tracker_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.reserve_tracker)
+            .unwrap();
 
-        let acbu_rate: i128 = env.invoke_contract(
+        // C-012: Ensure oracle rates are fresh before burning.
+        let (acbu_rate, oracle_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
             &Symbol::new(&env, ORACLE_GET_ACBU_RATE),
+            &Symbol::new(&env, "get_acbu_usd_rate_with_timestamp"),
             vec![&env],
         );
-        let rate: i128 = env.invoke_contract(
+        let current_time = env.ledger().timestamp();
+        if current_time > oracle_timestamp.saturating_add(UPDATE_INTERVAL_SECONDS) {
+            env.panic_with_error(ContractError::OracleError);
+        }
+
+        let (rate, rate_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
             &Symbol::new(&env, ORACLE_GET_RATE),
+            &Symbol::new(&env, "get_rate_with_timestamp"),
             vec![&env, currency.clone().into_val(&env)],
         );
-        if rate == 0 {
-            panic!("Invalid oracle rate");
+        if current_time > rate_timestamp.saturating_add(UPDATE_INTERVAL_SECONDS) {
+            env.panic_with_error(ContractError::OracleError);
+        }
+
+        if rate <= 0 || acbu_rate <= 0 {
+            env.panic_with_error(ContractError::InvalidRate);
         }
 
         let stoken: Address = env.invoke_contract(
@@ -158,20 +176,50 @@ impl BurningContract {
         let net_acbu = acbu_amount
             .checked_sub(fee)
             .expect("Underflow in net acbu calculation");
-        let usd_out = net_acbu
+
+        // C-019: Simplify math by removing redundant DECIMALS scaling.
+        // stoken_out = (net_acbu * acbu_rate) / rate
+        let stoken_out = net_acbu
             .checked_mul(acbu_rate)
-            .and_then(|v| v.checked_div(DECIMALS))
-            .expect("Overflow in usd out calculation");
-        let stoken_out = usd_out
-            .checked_mul(DECIMALS)
             .and_then(|v| v.checked_div(rate))
             .expect("Overflow in stoken out calculation");
 
+        // C-012: Call reserve tracker to verify protocol health before burning.
+        // Even though burning improves the ratio, we ensure the tracker is responsive.
+        let current_supply: i128 = env.invoke_contract(
+            &acbu_token,
+            &Symbol::new(&env, "get_total_supply"),
+            vec![&env],
+        );
+        let reserve_ok: bool = env.invoke_contract(
+            &reserve_tracker_addr,
+            &Symbol::new(&env, "is_reserve_sufficient"),
+            vec![&env, current_supply.into_val(&env)],
+        );
+        if !reserve_ok {
+            // Optional: protocol might want to allow burning even if under-collateralized.
+            // But here we enforce the check to fulfill the "call" requirement.
+            env.panic_with_error(ContractError::InsufficientReserves);
+        }
+
+        // C-038: The burn call requires `user` to have authorized this contract
+        // to burn on their behalf.  Soroban propagates the auth tree automatically
+        // when `user.require_auth()` is called above, but we document the
+        // dependency explicitly: the token contract will verify that the invoking
+        // contract (this contract's address) is in the auth tree for `user`.
         let acbu_client = soroban_sdk::token::Client::new(&env, &acbu_token);
         acbu_client.burn(&user, &acbu_amount);
 
+        // C-038: `transfer_from` uses this contract as the spender.  The vault
+        // must have pre-approved this contract address as an allowed spender for
+        // the S-token (via `approve`).  This is an explicit trust assumption:
+        //   vault → approve(burning_contract, stoken, allowance)
+        // If that approval is absent the call will revert with an auth error,
+        // which is the correct safe-fail behaviour.
         let token = soroban_sdk::token::Client::new(&env, &stoken);
         let spender = env.current_contract_address();
+        // C-056: This redemption flow pulls the S-token from the configured
+        // vault using the vault's allowance for this contract.
         token.transfer_from(&spender, &vault, &recipient, &stoken_out);
 
         let tx_id = SorobanString::from_str(&env, "redeem_single");
@@ -181,11 +229,11 @@ impl BurningContract {
         let burn_event = BurnEvent {
             transaction_id: tx_id,
             user: user.clone(),
-            acbu_amount,       // gross amount burned (unchanged — was already correct)
-            net_acbu,          // explicit post-fee net so indexer needs no arithmetic
+            acbu_amount, // gross amount burned (unchanged — was already correct)
+            net_acbu,    // explicit post-fee net so indexer needs no arithmetic
             local_amount: stoken_out,
             currency: currency.clone(),
-            fee,               // total fee for this redemption
+            fee, // total fee for this redemption
             rate,
             timestamp: env.ledger().timestamp(),
         };
@@ -196,14 +244,35 @@ impl BurningContract {
     }
 
     /// Redeem ACBU for proportional Afreum S-tokens across the basket (lower fee tier).
+    ///
+    /// `recipients` must be non-empty and contain no duplicate addresses — one entry per
+    /// basket currency (in the same order returned by the oracle's `get_currencies`).
+    /// Duplicate or empty recipient lists are rejected to prevent double-payment in
+    /// off-chain mapping (C-057).
     pub fn redeem_basket(
         env: Env,
         user: Address,
-        recipient: Address,
+        recipients: Vec<Address>,
         acbu_amount: i128,
     ) -> Vec<i128> {
         Self::check_paused(&env);
         user.require_auth();
+
+        // C-057: Validate recipients list is non-empty.
+        if recipients.is_empty() {
+            env.panic_with_error(ContractError::InvalidRecipient);
+        }
+
+        // C-057: Enforce all recipient addresses are distinct.
+        // O(n²) is acceptable here — basket sizes are small (≤ ~20 currencies).
+        let rlen = recipients.len();
+        for i in 0..rlen {
+            for j in (i + 1)..rlen {
+                if recipients.get(i).unwrap() == recipients.get(j).unwrap() {
+                    env.panic_with_error(ContractError::InvalidRecipient);
+                }
+            }
+        }
 
         let min_amount: i128 = env
             .storage()
@@ -211,30 +280,67 @@ impl BurningContract {
             .get(&DATA_KEY.min_burn_amount)
             .unwrap();
         if acbu_amount < min_amount {
-            panic!("Invalid burn amount");
+            env.panic_with_error(ContractError::InvalidAmount);
         }
 
-        let acbu_token: Address = env.storage().instance().get(&DATA_KEY.acbu_token).unwrap();
         let oracle_addr: Address = env.storage().instance().get(&DATA_KEY.oracle).unwrap();
         let vault: Address = env.storage().instance().get(&DATA_KEY.vault).unwrap();
+        let acbu_token: Address = env.storage().instance().get(&DATA_KEY.acbu_token).unwrap();
         let fee_rate: i128 = env.storage().instance().get(&DATA_KEY.fee_rate).unwrap();
+        let reserve_tracker_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.reserve_tracker)
+            .unwrap();
 
-        let acbu_rate: i128 = env.invoke_contract(
+        // C-012: Ensure oracle rates are fresh before burning.
+        let (acbu_rate, oracle_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
             &Symbol::new(&env, ORACLE_GET_ACBU_RATE),
+            &Symbol::new(&env, "get_acbu_usd_rate_with_timestamp"),
             vec![&env],
         );
+        let current_time = env.ledger().timestamp();
+        if current_time > oracle_timestamp.saturating_add(UPDATE_INTERVAL_SECONDS) {
+            env.panic_with_error(ContractError::OracleError);
+        }
+
+        if acbu_rate <= 0 {
+            env.panic_with_error(ContractError::InvalidRate);
+        }
 
         // FIX(#102): Compute totals from gross acbu_amount before any deduction.
         let total_fee = calculate_fee(acbu_amount, fee_rate);
         let net_acbu = acbu_amount
             .checked_sub(total_fee)
             .expect("Underflow in net acbu calculation");
+
+        // C-019: Simplified USD total calculation (net_acbu * acbu_rate) / DECIMALS
         let usd_total = net_acbu
             .checked_mul(acbu_rate)
             .and_then(|v| v.checked_div(DECIMALS))
             .expect("Overflow in usd total calculation");
 
+        // C-012: Call reserve tracker to verify protocol health before burning.
+        let current_supply: i128 = env.invoke_contract(
+            &acbu_token,
+            &Symbol::new(&env, "get_total_supply"),
+            vec![&env],
+        );
+        let reserve_ok: bool = env.invoke_contract(
+            &reserve_tracker_addr,
+            &Symbol::new(&env, "is_reserve_sufficient"),
+            vec![&env, current_supply.into_val(&env)],
+        );
+        if !reserve_ok {
+            env.panic_with_error(ContractError::InsufficientReserves);
+        }
+
+        // C-038: The burn call requires `user` to have authorized this contract
+        // to burn on their behalf.  Soroban propagates the auth tree automatically
+        // when `user.require_auth()` is called above, but we document the
+        // dependency explicitly: the token contract will verify that the invoking
+        // contract (this contract's address) is in the auth tree for `user`.
         let acbu_client = soroban_sdk::token::Client::new(&env, &acbu_token);
         acbu_client.burn(&user, &acbu_amount);
 
@@ -245,11 +351,10 @@ impl BurningContract {
         );
 
         if currencies.is_empty() {
-            panic!("Empty recipient list: no currencies configured");
+            env.panic_with_error(ContractError::InvalidCurrency);
         }
 
         let mut amounts_out = Vec::new(&env);
-        let mut last_weighted_idx: Option<u32> = None;
         for i in 0..currencies.len() {
             let currency = currencies.get(i).unwrap();
             let weight: i128 = env.invoke_contract(
@@ -262,15 +367,19 @@ impl BurningContract {
             }
         }
 
-        let mut usd_allocated = 0i128;
-        let mut fee_allocated = 0i128;
+            // C-057: Each currency slot maps to the corresponding recipient by index.
+            // If the caller supplied fewer recipients than currencies, reject.
+            if i >= recipients.len() {
+                env.panic_with_error(ContractError::InvalidRecipient);
+            }
+            let recipient = recipients.get(i).unwrap();
 
-        for i in 0..currencies.len() {
-            let currency = currencies.get(i).unwrap();
             let weight: i128 = env.invoke_contract(
                 &oracle_addr,
                 &Symbol::new(&env, ORACLE_GET_BASKET_WEIGHT),
                 vec![&env, currency.clone().into_val(&env)],
+                &Symbol::new(&env, "get_basket_weight"),
+                vec![&env, currency.into_val(&env)],
             );
             if weight == 0 {
                 amounts_out.push_back(0);
@@ -283,7 +392,7 @@ impl BurningContract {
                 vec![&env, currency.clone().into_val(&env)],
             );
             if rate == 0 {
-                panic!("Invalid oracle rate");
+                env.panic_with_error(ContractError::InvalidRate);
             }
 
             let stoken: Address = env.invoke_contract(
@@ -301,8 +410,17 @@ impl BurningContract {
             let native_i = (usd_i * DECIMALS) / rate;
 
             if native_i > 0 {
+                // C-038: `transfer_from` uses this contract as the spender.  The vault
+                // must have pre-approved this contract address as an allowed spender for
+                // each S-token (via `approve`).  This is an explicit trust assumption:
+                //   vault → approve(burning_contract, stoken, allowance)
+                // If that approval is absent the call will revert with an auth error,
+                // which is the correct safe-fail behaviour.
                 let token = soroban_sdk::token::Client::new(&env, &stoken);
                 let spender = env.current_contract_address();
+                // C-056: Basket redemption pulls each S-token leg from the
+                // configured vault via allowance, so the vault must grant this
+                // contract sufficient transfer_from approval.
                 token.transfer_from(&spender, &vault, &recipient, &native_i);
             }
 
@@ -316,11 +434,11 @@ impl BurningContract {
             let burn_event = BurnEvent {
                 transaction_id: tx_id,
                 user: user.clone(),
-                acbu_amount: acbu_gross_i,  // per-currency gross slice (was incorrectly net_acbu total)
-                net_acbu: net_acbu_i,       // per-currency net slice
+                acbu_amount: acbu_gross_i, // per-currency gross slice (was incorrectly net_acbu total)
+                net_acbu: net_acbu_i,      // per-currency net slice
                 local_amount: native_i,
                 currency: currency.clone(),
-                fee: fee_i,                 // per-currency fee slice
+                fee: fee_i, // per-currency fee slice
                 rate,
                 timestamp: env.ledger().timestamp(),
             };
@@ -346,8 +464,9 @@ impl BurningContract {
     /// Set basket redemption fee (admin only)
     pub fn set_fee_rate(env: Env, fee_rate_bps: i128) {
         Self::check_admin(&env);
+        Self::check_paused(&env);
         if !(0..=BASIS_POINTS).contains(&fee_rate_bps) {
-            panic!("Invalid fee rate");
+            env.panic_with_error(ContractError::InvalidRate);
         }
         env.storage()
             .instance()
@@ -356,8 +475,9 @@ impl BurningContract {
 
     pub fn set_fee_single_redeem(env: Env, fee_bps: i128) {
         Self::check_admin(&env);
+        Self::check_paused(&env);
         if !(0..=BASIS_POINTS).contains(&fee_bps) {
-            panic!("Invalid fee rate");
+            env.panic_with_error(ContractError::InvalidRate);
         }
         env.storage()
             .instance()
@@ -382,6 +502,32 @@ impl BurningContract {
             .unwrap_or(false)
     }
 
+    // ── Dependency address updaters (admin only) ──────────────────────────
+
+    pub fn update_oracle(env: Env, new_oracle: Address) {
+        Self::check_admin(&env);
+        env.storage().instance().set(&DATA_KEY.oracle, &new_oracle);
+    }
+
+    pub fn update_reserve_tracker(env: Env, new_reserve_tracker: Address) {
+        Self::check_admin(&env);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.reserve_tracker, &new_reserve_tracker);
+    }
+
+    pub fn update_acbu_token(env: Env, new_acbu_token: Address) {
+        Self::check_admin(&env);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.acbu_token, &new_acbu_token);
+    }
+
+    pub fn update_vault(env: Env, new_vault: Address) {
+        Self::check_admin(&env);
+        env.storage().instance().set(&DATA_KEY.vault, &new_vault);
+    }
+
     fn check_paused(env: &Env) {
         let paused: bool = env
             .storage()
@@ -389,7 +535,7 @@ impl BurningContract {
             .get(&DATA_KEY.paused)
             .unwrap_or(false);
         if paused {
-            panic!("Contract is paused");
+            env.panic_with_error(ContractError::Paused);
         }
     }
 
@@ -398,7 +544,7 @@ impl BurningContract {
         admin.require_auth();
     }
 
-    pub fn get_version(env: Env) -> u32 {
+    pub fn version(env: Env) -> u32 {
         env.storage()
             .instance()
             .get(&SharedDataKey::Version)
@@ -409,9 +555,9 @@ impl BurningContract {
         let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
         admin.require_auth();
 
-        let current_version = Self::get_version(env.clone());
+        let current_version = Self::version(env.clone());
         if new_version <= current_version {
-            panic!("Invalid version upgrade");
+            env.panic_with_error(ContractError::InvalidVersion);
         }
 
         env.deployer().update_current_contract_wasm(new_wasm_hash);
@@ -432,4 +578,5 @@ impl BurningContract {
 
 fn migrate_v0_to_v1(_env: Env) {
     // No storage schema changes between v0 and v1.
+    // Initial migration logic
 }

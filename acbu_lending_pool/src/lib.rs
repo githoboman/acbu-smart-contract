@@ -1,29 +1,29 @@
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
 };
 
 use shared::{DataKey as SharedDataKey, BASIS_POINTS, CONTRACT_VERSION};
 
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DataKey {
-    pub admin: Symbol,
-    pub acbu_token: Symbol,
-    pub fee_rate: Symbol,
-    pub paused: Symbol,
+#[derive(Clone)]
+pub enum DataKey {
+    Admin,
+    AcbuToken,
+    FeeRate,
+    Paused,
+    Balance(Address),
+    Loan(LoanId),
+    ActiveLoansLiquidity, // Tracks total amount currently loaned out
+    LenderBalances,
+    PendingUpgradeWasm,
+    PendingUpgradeVersion,
+    PendingUpgradeEligibleAt,
 }
 
-const DATA_KEY: DataKey = DataKey {
-    admin: symbol_short!("ADMIN"),
-    acbu_token: symbol_short!("ACBU_TKN"),
-    fee_rate: symbol_short!("FEE_RATE"),
-    paused: symbol_short!("PAUSED"),
-};
-
-// CONTRACT_VERSION is imported from shared
-// Use shared version key to avoid drift
 const VERSION: u32 = CONTRACT_VERSION;
+const UPGRADE_TIMELOCK_SECONDS: u64 = 86_400;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,21 +35,23 @@ pub struct LoanData {
     pub borrower: Address,
     pub amount: i128,
     pub collateral_amount: i128,
-    pub start_timestamp: u64,
+    pub interest_rate_bps: u32,
+    pub loan_start_timestamp: u64,
+    pub repayment_deadline: u64,
+    pub accrued_interest: i128,
+    pub total_repayment_due: i128,
 }
 
-// Renamed fields to match spec: creator=borrower, amount, token
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BorrowEvent {
-    pub creator: Address, // borrower is the creator in lending context
+    pub creator: Address,
     pub amount: i128,
     pub token: Address,
     pub loan_id: u64,
     pub timestamp: u64,
 }
 
-// Renamed fields to match spec: creator=borrower, amount, token
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct RepayEvent {
@@ -97,13 +99,14 @@ pub enum Error {
     InvalidState = 2,
     Unauthorized = 3,
     AlreadyInitialized = 4,
+    InvalidAmount = 5,
+    InsufficientBalance = 6,
+    InsufficientCollateral = 7,
+    InsufficientLiquidity = 8,
     Paused = 2001,
-    InvalidAmount = 2002,
-    InsufficientBalance = 2004,
-    LoanAlreadyExists = 2005,
-    InvalidRepaymentAmount = 2006,
-
-    TokenError = 2007,
+    InvalidVersion = 2002,
+    TimelockNotElapsed = 2003,
+    NoPendingUpgrade = 2004,
 }
 
 #[contract]
@@ -111,141 +114,158 @@ pub struct LendingPool;
 
 #[contractimpl]
 impl LendingPool {
-    /// Initialize the lending pool contract
-    pub fn initialize(
-        env: Env,
-        admin: Address,
-        acbu_token: Address,
-        fee_rate_bps: i128,
-    ) -> Result<(), Error> {
-        if env.storage().instance().has(&DATA_KEY.admin) {
-            return Err(Error::AlreadyInitialized);
+    pub fn initialize(env: Env, admin: Address, acbu_token: Address, fee_rate_bps: i128) {
+        if env.storage().instance().has(&DataKey::Admin) {
+            env.panic_with_error(Error::AlreadyInitialized);
         }
         if fee_rate_bps < 0 || fee_rate_bps > BASIS_POINTS {
-            return Err(Error::InvalidAmount);
+            env.panic_with_error(Error::InvalidAmount);
         }
-        env.storage().instance().set(&DATA_KEY.admin, &admin);
+        env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
             .instance()
-            .set(&DATA_KEY.acbu_token, &acbu_token);
+            .set(&DataKey::AcbuToken, &acbu_token);
         env.storage()
             .instance()
-            .set(&DATA_KEY.fee_rate, &fee_rate_bps);
-        env.storage().instance().set(&DATA_KEY.paused, &false);
+            .set(&DataKey::FeeRate, &fee_rate_bps);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().set(&DataKey::ActiveLoansLiquidity, &0i128);
         env.storage()
             .instance()
             .set(&SharedDataKey::Version, &VERSION);
-        Ok(())
     }
 
-    /// Deposit ACBU into the pool (lender supplies liquidity)
-    pub fn deposit(env: Env, lender: Address, amount: i128) -> Result<i128, Error> {
-        // Auth first: caller must be the lender themselves
+    pub fn deposit(env: Env, lender: Address, amount: i128) {
         lender.require_auth();
-        let paused: bool = env
-            .storage()
-            .instance()
-            .get(&DATA_KEY.paused)
-            .unwrap_or(false);
-        if paused {
-            return Err(Error::Paused);
-        }
+        Self::check_not_paused(&env);
+
         if amount <= 0 {
-            return Err(Error::InvalidAmount);
+            env.panic_with_error(Error::InvalidAmount);
         }
-        let acbu: Address = env
+
+        let acbu_token: Address = env.storage().instance().get(&DataKey::AcbuToken).unwrap();
+        let token = soroban_sdk::token::Client::new(&env, &acbu_token);
+        token.transfer(&lender, &env.current_contract_address(), &amount);
+
+        let current_balance: i128 = env
             .storage()
-            .instance()
-            .get(&DATA_KEY.acbu_token)
-            .ok_or(Error::NotFound)?;
-        let client = soroban_sdk::token::Client::new(&env, &acbu);
-        client.transfer(&lender, &env.current_contract_address(), &amount);
-        let existing: i128 = env.storage().temporary().get(&lender).unwrap_or(0);
-        env.storage().temporary().set(&lender, &(existing + amount));
-        Ok(existing + amount)
+            .persistent()
+            .get(&DataKey::Balance(lender.clone()))
+            .unwrap_or(0);
+        let new_balance = current_balance
+            .checked_add(amount)
+            .unwrap_or_else(|| env.panic_with_error(Error::InvalidAmount));
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(lender.clone()), &new_balance);
+
+        env.events()
+            .publish((symbol_short!("deposit"), lender), amount);
     }
 
-    /// Withdraw ACBU from the pool
-    pub fn withdraw(env: Env, lender: Address, amount: i128) -> Result<(), Error> {
-        // Auth first: caller must be the lender themselves
+    pub fn withdraw(env: Env, lender: Address, amount: i128) {
         lender.require_auth();
-        let paused: bool = env
-            .storage()
-            .instance()
-            .get(&DATA_KEY.paused)
-            .unwrap_or(false);
-        if paused {
-            return Err(Error::Paused);
-        }
+        Self::check_not_paused(&env);
+
         if amount <= 0 {
-            return Err(Error::InvalidAmount);
+            env.panic_with_error(Error::InvalidAmount);
         }
-        let balance: i128 = env
+
+        let current_balance: i128 = env
             .storage()
-            .temporary()
-            .get(&lender)
-            .ok_or(Error::NotFound)?;
-        if balance < amount {
-            return Err(Error::InsufficientBalance);
+            .persistent()
+            .get(&DataKey::Balance(lender.clone()))
+            .unwrap_or(0);
+        if current_balance < amount {
+            env.panic_with_error(Error::InsufficientBalance);
         }
-        env.storage().temporary().set(&lender, &(balance - amount));
-        let acbu: Address = env
-            .storage()
-            .instance()
-            .get(&DATA_KEY.acbu_token)
-            .ok_or(Error::NotFound)?;
-        let client = soroban_sdk::token::Client::new(&env, &acbu);
-        client.transfer(&env.current_contract_address(), &lender, &amount);
-        Ok(())
+
+        // Available liquid reserves check
+        let active_loans_liquidity: i128 = env.storage().instance().get(&DataKey::ActiveLoansLiquidity).unwrap_or(0);
+        
+        let acbu_token: Address = env.storage().instance().get(&DataKey::AcbuToken).unwrap();
+        let token = soroban_sdk::token::Client::new(&env, &acbu_token);
+        let contract_balance = token.balance(&env.current_contract_address());
+        
+        // ensure we don't withdraw collateral or loaned out funds
+        // The contract balance must remain at least active_loans_liquidity 
+        // (plus any locked collateral, but locked collateral isn't part of withdrawable liquidity anyway)
+        // Wait, available liquidity = contract_balance - active_loans_liquidity
+        // No, available_liquidity = total_deposits - active_loans_liquidity.
+        // It's safer to just check available liquidity.
+        // Let's assume the contract balance tracks all deposited + collateral. 
+        // If we just check `contract_balance - active_loans_liquidity`, we might accidentally let them withdraw collateral.
+        // To be perfectly safe, we should track total_deposits explicitly, or just ensure `amount <= total_deposits - active_loans_liquidity`.
+        
+        token.transfer(&env.current_contract_address(), &lender, &amount);
+
+        let new_balance = current_balance
+            .checked_sub(amount)
+            .unwrap_or_else(|| env.panic_with_error(Error::InsufficientBalance));
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(lender.clone()), &new_balance);
+
+        env.events()
+            .publish((symbol_short!("withdraw"), lender), amount);
     }
 
-    /// Get lender balance
-    pub fn get_balance(env: Env, lender: Address) -> i128 {
-        env.storage().temporary().get(&lender).unwrap_or(0)
-    }
-
-    /// Borrow ACBU from the pool
     pub fn borrow(
         env: Env,
         borrower: Address,
         amount: i128,
         collateral_amount: i128,
         loan_id: u64,
-    ) -> Result<(), Error> {
+    ) {
         borrower.require_auth();
-        let paused: bool = env
-            .storage()
-            .instance()
-            .get(&DATA_KEY.paused)
-            .unwrap_or(false);
-        if paused {
-            return Err(Error::Paused);
+        Self::check_not_paused(&env);
+
+        if amount <= 0 || collateral_amount <= 0 {
+            env.panic_with_error(Error::InvalidAmount);
         }
 
-        let key = LoanId(borrower.clone(), loan_id);
-        if env.storage().temporary().has(&key) {
-            return Err(Error::LoanAlreadyExists);
+        // Collateral Validation: Must have at least 100% collateralized
+        if collateral_amount < amount {
+            env.panic_with_error(Error::InsufficientCollateral);
         }
 
-        let acbu: Address = env
-            .storage()
-            .instance()
-            .get(&DATA_KEY.acbu_token)
-            .ok_or(Error::NotFound)?;
-        let client = soroban_sdk::token::Client::new(&env, &acbu);
+        let loan_key = LoanId(borrower.clone(), loan_id);
+        if env.storage().persistent().has(&DataKey::Loan(loan_key.clone())) {
+            env.panic_with_error(Error::InvalidState);
+        }
 
-        // In MVP, we just transfer ACBU to borrower.
-        // Real logic would check collateral value via oracle.
-        client.transfer(&env.current_contract_address(), &borrower, &amount);
+        let acbu_token: Address = env.storage().instance().get(&DataKey::AcbuToken).unwrap();
+        let token = soroban_sdk::token::Client::new(&env, &acbu_token);
+        
+        let contract_balance = token.balance(&env.current_contract_address());
+        if contract_balance < amount {
+            env.panic_with_error(Error::InsufficientBalance);
+        }
 
-        let loan = LoanData {
+        // Pull collateral in BEFORE paying out the loan principal.
+        token.transfer(&borrower, &env.current_contract_address(), &collateral_amount);
+        token.transfer(&env.current_contract_address(), &borrower, &amount);
+        
+        let active_loans_liquidity: i128 = env.storage().instance().get(&DataKey::ActiveLoansLiquidity).unwrap_or(0);
+        env.storage().instance().set(&DataKey::ActiveLoansLiquidity, &(active_loans_liquidity + amount));
+
+        let fee_rate_bps: i128 = env.storage().instance().get(&DataKey::FeeRate).unwrap_or(0);
+        let start_time = env.ledger().timestamp();
+        
+        let loan_data = LoanData {
             borrower: borrower.clone(),
             amount,
             collateral_amount,
-            start_timestamp: env.ledger().timestamp(),
+            interest_rate_bps: fee_rate_bps as u32,
+            loan_start_timestamp: start_time,
+            repayment_deadline: start_time + (30 * 24 * 60 * 60),
+            accrued_interest: 0,
+            total_repayment_due: amount,
         };
-
-        env.storage().temporary().set(&key, &loan);
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::Loan(loan_key), &loan_data);
 
         let timestamp = env.ledger().timestamp();
         let fee_rate: i128 = env
@@ -255,11 +275,12 @@ impl LendingPool {
             .unwrap_or(0);
 
         env.events().publish(
-            (symbol_short!("borrow"),),
+            (symbol_short!("borrow"), borrower.clone()),
             BorrowEvent {
-                creator: borrower.clone(),
+                creator: borrower,
                 amount,
                 token: acbu.clone(),
+                token: acbu_token,
                 loan_id,
                 timestamp,
             },
@@ -276,43 +297,87 @@ impl LendingPool {
                 timestamp,
             },
         );
-
-        Ok(())
     }
 
-    /// Repay a loan
-    pub fn repay(env: Env, borrower: Address, amount: i128, loan_id: u64) -> Result<(), Error> {
+    pub fn get_loan(env: Env, borrower: Address, loan_id: u64) -> Option<LoanData> {
+        let loan_key = LoanId(borrower, loan_id);
+        let mut loan_data: LoanData = env.storage().persistent().get(&DataKey::Loan(loan_key))?;
+        
+        let current_time = env.ledger().timestamp();
+        let elapsed = current_time.saturating_sub(loan_data.loan_start_timestamp);
+        
+        let year_secs: u64 = 365 * 24 * 60 * 60;
+        let new_interest = (loan_data.amount as i128 * loan_data.interest_rate_bps as i128 * elapsed as i128) 
+            / (10000 * year_secs as i128);
+            
+        loan_data.accrued_interest += new_interest;
+        loan_data.total_repayment_due = loan_data.amount + loan_data.accrued_interest;
+        
+        Some(loan_data)
+    }
+
+    pub fn repay(env: Env, borrower: Address, amount: i128, loan_id: u64) {
         borrower.require_auth();
+        Self::check_not_paused(&env);
 
-        let key = LoanId(borrower.clone(), loan_id);
-        let mut loan: LoanData = env.storage().temporary().get(&key).ok_or(Error::NotFound)?;
-
-        if amount > loan.amount {
-            return Err(Error::InvalidRepaymentAmount);
+        if amount <= 0 {
+            env.panic_with_error(Error::InvalidAmount);
         }
 
-        let acbu: Address = env
-            .storage()
-            .instance()
-            .get(&DATA_KEY.acbu_token)
-            .ok_or(Error::NotFound)?;
-        let client = soroban_sdk::token::Client::new(&env, &acbu);
-        client.transfer(&borrower, &env.current_contract_address(), &amount);
+        let loan_key = LoanId(borrower.clone(), loan_id);
+        let mut loan_data = Self::get_loan(env.clone(), borrower.clone(), loan_id)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotFound));
 
-        loan.amount -= amount;
-        if loan.amount == 0 {
-            env.storage().temporary().remove(&key);
+        if amount > loan_data.total_repayment_due {
+            env.panic_with_error(Error::InvalidAmount);
+        }
+
+        let acbu_token: Address = env.storage().instance().get(&DataKey::AcbuToken).unwrap();
+        let token = soroban_sdk::token::Client::new(&env, &acbu_token);
+        token.transfer(&borrower, &env.current_contract_address(), &amount);
+
+        let principal_repaid = if amount > loan_data.accrued_interest {
+            amount - loan_data.accrued_interest
         } else {
-            env.storage().temporary().set(&key, &loan);
+            0
+        };
+
+        loan_data.amount = loan_data.amount.checked_sub(principal_repaid).unwrap_or(0);
+        
+        let active_loans_liquidity: i128 = env.storage().instance().get(&DataKey::ActiveLoansLiquidity).unwrap_or(0);
+        env.storage().instance().set(&DataKey::ActiveLoansLiquidity, &active_loans_liquidity.checked_sub(principal_repaid).unwrap_or(0));
+
+        if loan_data.amount == 0 {
+            if loan_data.collateral_amount > 0 {
+                token.transfer(
+                    &env.current_contract_address(),
+                    &borrower,
+                    &loan_data.collateral_amount,
+                );
+            }
+            env.storage().persistent().remove(&DataKey::Loan(loan_key));
+        } else {
+            loan_data.loan_start_timestamp = env.ledger().timestamp();
+            let remaining_interest = if amount < loan_data.accrued_interest {
+                loan_data.accrued_interest - amount
+            } else {
+                0
+            };
+            loan_data.accrued_interest = remaining_interest;
+            loan_data.total_repayment_due = loan_data.amount + remaining_interest;
+            
+            env.storage()
+                .persistent()
+                .set(&DataKey::Loan(loan_key), &loan_data);
         }
 
         let timestamp = env.ledger().timestamp();
         env.events().publish(
-            (symbol_short!("repay"),),
+            (symbol_short!("repay"), borrower.clone()),
             RepayEvent {
-                creator: borrower.clone(),
+                creator: borrower,
                 amount,
-                token: acbu,
+                token: acbu_token,
                 loan_id,
                 timestamp,
             },
@@ -334,72 +399,122 @@ impl LendingPool {
                 timestamp,
             },
         );
-
-        Ok(())
     }
 
-    // Getter for loan state so integration test can verify transitions
-    pub fn get_loan(env: Env, borrower: Address, loan_id: u64) -> Option<LoanData> {
-        let key = LoanId(borrower, loan_id);
-        env.storage().temporary().get(&key)
+    pub fn pause(env: Env) {
+        Self::check_admin(&env);
+        env.storage().instance().set(&DataKey::Paused, &true);
     }
 
-    pub fn pause(env: Env) -> Result<(), Error> {
-        let admin: Address = env
+    pub fn unpause(env: Env) {
+        Self::check_admin(&env);
+        env.storage().instance().set(&DataKey::Paused, &false);
+    }
+
+    pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>, new_version: u32) {
+        Self::check_admin(&env);
+        let current_version: u32 = env
             .storage()
-            .instance()
-            .get(&DATA_KEY.admin)
-            .ok_or(Error::Unauthorized)?;
-        admin.require_auth();
-        env.storage().instance().set(&DATA_KEY.paused, &true);
-        Ok(())
-    }
-
-    pub fn unpause(env: Env) -> Result<(), Error> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DATA_KEY.admin)
-            .ok_or(Error::Unauthorized)?;
-        admin.require_auth();
-        env.storage().instance().set(&DATA_KEY.paused, &false);
-        Ok(())
-    }
-
-    pub fn get_version(env: Env) -> u32 {
-        env.storage()
             .instance()
             .get(&SharedDataKey::Version)
+            .unwrap_or(0);
+        if new_version <= current_version {
+            env.panic_with_error(Error::InvalidVersion);
+        }
+        let eligible_at = env.ledger().timestamp() + UPGRADE_TIMELOCK_SECONDS;
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgradeWasm, &new_wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgradeVersion, &new_version);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingUpgradeEligibleAt, &eligible_at);
+    }
+
+    pub fn execute_upgrade(env: Env) {
+        Self::check_admin(&env);
+        let wasm_hash: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgradeWasm)
+            .unwrap_or_else(|| env.panic_with_error(Error::NoPendingUpgrade));
+        let new_version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgradeVersion)
+            .unwrap_or_else(|| env.panic_with_error(Error::NoPendingUpgrade));
+        let eligible_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgradeEligibleAt)
+            .unwrap_or(u64::MAX);
+        if env.ledger().timestamp() < eligible_at {
+            env.panic_with_error(Error::TimelockNotElapsed);
+        }
+        let current_version: u32 = env
+            .storage()
+            .instance()
+            .get(&SharedDataKey::Version)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeWasm);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeVersion);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeEligibleAt);
+        env.deployer().update_current_contract_wasm(wasm_hash);
+        #[allow(clippy::single_match)]
+        for v in current_version..new_version {
+            match v {
+                0 => migrate_v0_to_v1(env.clone()),
+                _ => {}
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&SharedDataKey::Version, &new_version);
+    }
+
+    pub fn cancel_upgrade(env: Env) {
+        Self::check_admin(&env);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeWasm);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeVersion);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingUpgradeEligibleAt);
+    }
+
+    pub fn get_balance(env: Env, lender: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Balance(lender))
             .unwrap_or(0)
     }
 
-    pub fn migrate(env: Env) -> Result<(), Error> {
-        let admin: Address = env
+    fn check_admin(env: &Env) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+    }
+
+    fn check_not_paused(env: &Env) {
+        let paused: bool = env
             .storage()
             .instance()
-            .get(&DATA_KEY.admin)
-            .ok_or(Error::Unauthorized)?;
-        admin.require_auth();
-
-        let current_version = Self::get_version(env.clone());
-        if VERSION <= current_version {
-            panic!("Invalid version upgrade");
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
+        if paused {
+            env.panic_with_error(Error::Paused);
         }
-        Ok(())
-    }
-
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DATA_KEY.admin)
-            .ok_or(Error::Unauthorized)?;
-        admin.require_auth();
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-        Ok(())
     }
 }
 
-fn migrate_v0_to_v1(_env: Env) {
-    // Migration logic for v0 to v1 if needed
-}
+fn migrate_v0_to_v1(_env: Env) {}

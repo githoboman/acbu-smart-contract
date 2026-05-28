@@ -2,6 +2,7 @@
 
 use acbu_savings_vault::DepositEvent;
 use acbu_savings_vault::{SavingsVault, SavingsVaultClient, WithdrawEvent};
+use shared::DECIMALS;
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger},
@@ -29,7 +30,7 @@ fn test_withdraw_after_term_has_correct_30day_yield() {
     let yield_rate = 1_000; // 10% APR
     client.initialize(&admin, &acbu_token, &fee_rate, &yield_rate);
 
-    let deposit_amount = 10_000_000i128;
+    let deposit_amount = DECIMALS;
     let term_seconds = 30 * 24 * 3600u64; // 2_592_000 seconds
 
     let expected_fee = 300_000i128;
@@ -91,7 +92,7 @@ fn test_withdraw_after_one_year_has_positive_yield_and_event_value() {
     let yield_rate = 1_000; // 10% APR
     client.initialize(&admin, &acbu_token, &fee_rate, &yield_rate);
 
-    let deposit_amount = 10_000_000;
+    let deposit_amount = DECIMALS;
     let expected_fee = 300_000;
     // Base everything on net
     let net_deposit = 9_700_000;
@@ -206,7 +207,7 @@ fn test_early_withdrawal_is_rejected() {
 
     client.initialize(&admin, &acbu_token, &300, &1_000);
 
-    let deposit_amount = 10_000_000;
+    let deposit_amount = DECIMALS;
 
     let net_deposit = 9_700_000;
     let term_seconds: u64 = 30 * 24 * 3600; // 30 days
@@ -248,7 +249,7 @@ fn test_withdraw_at_exact_term_boundary_succeeds() {
     let yield_rate = 0i128;
     client.initialize(&admin, &acbu_token, &fee_rate, &yield_rate);
 
-    let deposit_amount = 10_000_000i128;
+    let deposit_amount = DECIMALS;
     let term_seconds: u64 = 60 * 60; // 1 hour
 
     let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &acbu_token);
@@ -325,7 +326,7 @@ fn test_deposit_fee_reflected_in_balance() {
     let yield_rate = 0;
     client.initialize(&admin, &acbu_token, &fee_rate, &yield_rate);
 
-    let gross_deposit = 10_000_000i128;
+    let gross_deposit = DECIMALS;
     let expected_fee = 300_000i128;
     let expected_net = 9_700_000i128;
     let term_seconds = 3600u64;
@@ -360,9 +361,9 @@ fn test_deposit_event_has_fee_fields() {
 
     client.initialize(&admin, &acbu_token, &300, &0);
     let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &acbu_token);
-    token_admin.mint(&user, &10_000_000);
+    token_admin.mint(&user, &DECIMALS);
 
-    client.deposit(&user, &10_000_000, &3600);
+    client.deposit(&user, &DECIMALS, &3600);
 
     let events = env.events().all();
     let deposit_event = events
@@ -375,7 +376,80 @@ fn test_deposit_event_has_fee_fields() {
         .unwrap();
     let deposit_event: DepositEvent = deposit_event.2.into_val(&env);
 
-    assert_eq!(deposit_event.gross_amount, 10_000_000);
+    assert_eq!(deposit_event.gross_amount, DECIMALS);
     assert_eq!(deposit_event.fee_amount, 300_000);
     assert_eq!(deposit_event.net_amount, 9_700_000);
+}
+
+#[test]
+fn test_update_acbu_token_by_admin_savings_vault() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let acbu_token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
+    let contract_id = env.register_contract(None, SavingsVault);
+    let client = SavingsVaultClient::new(&env, &contract_id);
+    client.initialize(&admin, &acbu_token, &100, &500);
+
+    let new_token = Address::generate(&env);
+    client.update_acbu_token(&new_token);
+}
+
+/// Issue #225 regression: WithdrawEvent.yield_amount must not be zero when a
+/// positive yield_rate is set and time has elapsed past the lock term.
+#[test]
+fn test_withdraw_event_yield_amount_nonzero_issue_225() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let acbu_token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
+    let contract_id = env.register_contract(None, SavingsVault);
+    let client = SavingsVaultClient::new(&env, &contract_id);
+
+    let yield_rate_bps = 1_000i128; // 10% APR
+    client.initialize(&admin, &acbu_token, &0i128, &yield_rate_bps);
+
+    let principal = DECIMALS;
+    let term_seconds = 30 * 24 * 3600u64;
+
+    let elapsed = term_seconds as i128;
+    let expected_yield =
+        principal * yield_rate_bps * elapsed / (10_000 * SECONDS_PER_YEAR as i128);
+
+    let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &acbu_token);
+    token_admin.mint(&user, &principal);
+    token_admin.mint(&contract_id, &expected_yield);
+
+    client.deposit(&user, &principal, &term_seconds);
+    env.ledger()
+        .with_mut(|l| l.timestamp = 1_000_000 + term_seconds);
+
+    client.withdraw(&user, &term_seconds, &principal);
+
+    let events = env.events().all();
+    let withdraw_ev = events
+        .iter()
+        .rev()
+        .find(|e| {
+            e.0 == contract_id
+                && Symbol::from_val(&env, &e.1.get(0).unwrap()) == symbol_short!("Withdraw")
+        })
+        .expect("Withdraw event must be emitted");
+
+    let ev: WithdrawEvent = withdraw_ev.2.into_val(&env);
+    assert!(
+        ev.yield_amount > 0,
+        "WithdrawEvent.yield_amount must be non-zero when yield_rate > 0 (issue #225 regression)"
+    );
+    assert_eq!(ev.yield_amount, expected_yield);
+    assert_eq!(ev.fee_amount, 0);
 }

@@ -20,4 +20,5 @@ fs.writeFileSync('validators.json', JSON.stringify([ADMIN]));
 fs.writeFileSync('currencies.json', JSON.stringify(currencies));
 fs.writeFileSync('weights.json', JSON.stringify(weights));
 
+// log
 console.log("JSON files created.");
