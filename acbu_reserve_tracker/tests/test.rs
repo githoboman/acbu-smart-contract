@@ -184,6 +184,86 @@ fn test_zero_and_negative_total_supply_returns_true() {
 }
 
 #[test]
+fn test_reset_reserves_by_admin_clears_all_entries() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1);
+
+    let admin = Address::generate(&env);
+    let oracle = env.register_contract(None, MockOracle);
+
+    let contract_id = env.register_contract(None, ReserveTrackerContract);
+    let client = ReserveTrackerContractClient::new(&env, &contract_id);
+
+    let acbu_token = Address::generate(&env);
+    client.initialize(&admin, &oracle, &acbu_token, &10_000i128);
+
+    let ngn = CurrencyCode::new(&env, "NGN");
+    let kes = CurrencyCode::new(&env, "KES");
+    client.update_reserve(&admin, &ngn, &1_000, &(5 * DECIMALS));
+    client.update_reserve(&admin, &kes, &2_000, &(5 * DECIMALS));
+
+    assert_eq!(client.get_all_reserves().len(), 2);
+
+    client.reset_reserves();
+
+    assert_eq!(
+        client.get_all_reserves().len(),
+        0,
+        "reset_reserves must wipe all stored reserve entries"
+    );
+}
+
+#[test]
+fn test_reset_reserves_without_admin_auth_fails() {
+    let env = Env::default();
+    env.ledger().with_mut(|l| l.timestamp = 1);
+
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let oracle = env.register_contract(None, MockOracle);
+
+    let contract_id = env.register_contract(None, ReserveTrackerContract);
+    let client = ReserveTrackerContractClient::new(&env, &contract_id);
+
+    let acbu_token = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &oracle, &acbu_token, &10_000i128);
+
+    let ngn = CurrencyCode::new(&env, "NGN");
+    client.update_reserve(&admin, &ngn, &1_000, &(5 * DECIMALS));
+
+    // Provide only the attacker's auth — reset_reserves must reject it.
+    use soroban_sdk::testutils::MockAuth;
+    use soroban_sdk::testutils::MockAuthInvoke;
+    use soroban_sdk::IntoVal;
+    env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "reset_reserves",
+            args: ().into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = client.try_reset_reserves();
+    assert!(
+        result.is_err(),
+        "reset_reserves must reject callers that are not the admin"
+    );
+
+    // Reserves must be untouched after the failed attempt.
+    env.mock_all_auths();
+    assert_eq!(
+        client.get_all_reserves().len(),
+        1,
+        "reserves must remain intact after a failed reset attempt"
+    );
+}
+
+#[test]
 fn test_verify_reserves_errors_when_total_supply_is_zero() {
     let env = Env::default();
     env.mock_all_auths();

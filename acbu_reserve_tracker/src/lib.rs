@@ -205,6 +205,23 @@ impl ReserveTrackerContract {
     }
 
     // -----------------------------------------------------------------------
+    // Reserve management (admin only)
+    // -----------------------------------------------------------------------
+
+    /// Replace all stored reserves with an empty map (admin only).
+    ///
+    /// Requires admin authorisation.  Without the auth gate any caller could
+    /// wipe the reserves map, making verify_reserves trivially pass (empty
+    /// reserves → zero total_reserve_usd → ratio check skipped when supply is
+    /// also zero).  This function is intentionally destructive and should only
+    /// be used for emergency recovery or contract reset by the admin.
+    pub fn reset_reserves(env: Env) {
+        Self::check_admin(&env);
+        let empty: Map<CurrencyCode, ReserveData> = Map::new(&env);
+        env.storage().instance().set(&DATA_KEY.reserves, &empty);
+    }
+
+    // -----------------------------------------------------------------------
     // Dependency address updaters (admin only)
     // -----------------------------------------------------------------------
 
