@@ -6,7 +6,7 @@ use soroban_sdk::{
 
 use shared::{
     calculate_amount_after_fee, calculate_fee, CurrencyCode, DataKey as SharedDataKey, MintEvent,
-    BASIS_POINTS, CONTRACT_VERSION, DECIMALS, MAX_MINT_AMOUNT, MIN_MINT_AMOUNT,
+    BASIS_POINTS, CONTRACT_VERSION, DECIMALS, MAX_MINT_AMOUNT, MAX_TOTAL_SUPPLY, MIN_MINT_AMOUNT,
     UPDATE_INTERVAL_SECONDS,
     ORACLE_GET_ACBU_RATE_WITH_TS, ORACLE_GET_RATE_WITH_TS, ORACLE_GET_CURRENCIES,
     ORACLE_GET_BASKET_WEIGHT, ORACLE_GET_RATE, ORACLE_GET_S_TOKEN_ADDR, RESERVE_IS_SUFFICIENT,
@@ -47,6 +47,7 @@ pub struct DataKey {
     pub operator: Symbol,
     pub used_proofs: Symbol,
     pub processed_fintech_tx_ids: Symbol,
+    pub max_supply: Symbol,
 }
 
 const DATA_KEY: DataKey = DataKey {
@@ -66,6 +67,7 @@ const DATA_KEY: DataKey = DataKey {
     operator: symbol_short!("OPERATOR"),
     used_proofs: symbol_short!("PROOFS"),
     processed_fintech_tx_ids: symbol_short!("FTX_IDS"),
+    max_supply: symbol_short!("MAX_SUP"),
 };
 
 // CONTRACT_VERSION is imported from shared
@@ -92,6 +94,7 @@ pub enum MintingError {
     FintechTxIdTooLong = 5016,
     FintechTxIdInvalidChar = 5017,
     InvalidVersion = 5018,
+    MaxSupplyExceeded = 5019,
 }
 
 #[contract]
@@ -155,6 +158,9 @@ impl MintingContract {
         env.storage().instance().set(&DATA_KEY.total_supply, &0i128);
         env.storage()
             .instance()
+            .set(&DATA_KEY.max_supply, &MAX_TOTAL_SUPPLY);
+        env.storage()
+            .instance()
             .set(&SharedDataKey::Version, &CONTRACT_VERSION);
     }
 
@@ -213,6 +219,7 @@ impl MintingContract {
         let projected_supply = total_supply
             .checked_add(acbu_amount)
             .expect("Overflow in projected supply calculation");
+        Self::check_supply_cap(&env, projected_supply);
         let reserve_ok: bool = env.invoke_contract(
             &reserve_tracker_addr,
             &Symbol::new(&env, RESERVE_IS_SUFFICIENT),
@@ -319,6 +326,7 @@ impl MintingContract {
         let projected_supply = total_supply
             .checked_add(acbu_amount)
             .expect("Overflow in projected supply calculation");
+        Self::check_supply_cap(&env, projected_supply);
 
         let reserve_ok: bool = env.invoke_contract(
             &reserve_tracker_addr,
@@ -499,6 +507,7 @@ impl MintingContract {
         let projected_supply = total_supply
             .checked_add(acbu_amount)
             .expect("Overflow in projected supply calculation");
+        Self::check_supply_cap(&env, projected_supply);
         let reserve_ok: bool = env.invoke_contract(
             &reserve_tracker_addr,
             &Symbol::new(&env, RESERVE_IS_SUFFICIENT),
@@ -625,6 +634,7 @@ impl MintingContract {
         let projected_supply = total_supply
             .checked_add(acbu_amount)
             .expect("Overflow in projected supply calculation");
+        Self::check_supply_cap(&env, projected_supply);
         let reserve_ok: bool = env.invoke_contract(
             &reserve_tracker_addr,
             &Symbol::new(&env, RESERVE_IS_SUFFICIENT),
@@ -762,7 +772,10 @@ impl MintingContract {
             .and_then(|v| v.checked_div(acbu_rate))
             .expect("Overflow in acbu amount calculation");
 
-        let projected_supply = total_supply + acbu_amount;
+        let projected_supply = total_supply
+            .checked_add(acbu_amount)
+            .expect("Overflow in projected supply calculation");
+        Self::check_supply_cap(&env, projected_supply);
         let reserve_ok: bool = env.invoke_contract(
             &reserve_tracker_addr,
             &Symbol::new(&env, "is_reserve_sufficient"),
@@ -959,6 +972,7 @@ impl MintingContract {
         let projected_supply = total_supply
             .checked_add(acbu_amount)
             .expect("Overflow in projected supply calculation");
+        Self::check_supply_cap(&env, projected_supply);
         let reserve_ok: bool = env.invoke_contract(
             &reserve_tracker_addr,
             &Symbol::new(&env, RESERVE_IS_SUFFICIENT),
@@ -1019,6 +1033,7 @@ impl MintingContract {
         let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
         admin.require_auth();
         Self::check_paused(&env);
+        Self::check_supply_cap(&env, new_supply);
         env.storage()
             .instance()
             .set(&DATA_KEY.total_supply, &new_supply);
@@ -1029,6 +1044,33 @@ impl MintingContract {
             .instance()
             .get(&DATA_KEY.total_supply)
             .unwrap_or(0)
+    }
+
+    pub fn get_max_supply(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DATA_KEY.max_supply)
+            .unwrap_or(MAX_TOTAL_SUPPLY)
+    }
+
+    pub fn set_max_supply(env: Env, new_max_supply: i128) {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        admin.require_auth();
+        Self::check_paused(&env);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.max_supply, &new_max_supply);
+    }
+
+    fn check_supply_cap(env: &Env, projected_supply: i128) {
+        let max_supply: i128 = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.max_supply)
+            .unwrap_or(MAX_TOTAL_SUPPLY);
+        if projected_supply > max_supply {
+            env.panic_with_error(MintingError::MaxSupplyExceeded);
+        }
     }
 
     pub fn pause(env: Env) {
