@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, vec, Address, BytesN, Env, IntoVal,
-    String as SorobanString, Symbol,
+    contract, contracterror, contractimpl, contracttype, symbol_short, vec, Address, BytesN, Env,
+    IntoVal, String as SorobanString, Symbol,
 };
 
 use shared::{
@@ -12,12 +12,11 @@ use shared::{
     ORACLE_GET_BASKET_WEIGHT, ORACLE_GET_RATE, ORACLE_GET_S_TOKEN_ADDR, RESERVE_IS_SUFFICIENT,
 };
 
-
 #[allow(dead_code)]
 pub mod token_contract {
     soroban_sdk::contractimport!(
         file = "../soroban_token_contract.wasm",
-        sha256 = "6b14997b915dee21082884cd5a2f1f2f0aef0073d1dcb9c5b3c674cf487fb41d"
+        sha256 = "d97a3e83c3523504e4ae1dc74b89fcaee443f77ac6c88744d0b28f963571aac5"
     );
 }
 
@@ -47,6 +46,7 @@ pub struct DataKey {
     pub total_supply: Symbol,
     pub operator: Symbol,
     pub used_proofs: Symbol,
+    pub processed_fintech_tx_ids: Symbol,
 }
 
 const DATA_KEY: DataKey = DataKey {
@@ -63,11 +63,36 @@ const DATA_KEY: DataKey = DataKey {
     min_mint_amount: symbol_short!("MIN_MINT"),
     max_mint_amount: symbol_short!("MAX_MINT"),
     total_supply: symbol_short!("SUPPLY"),
-    operator: symbol_short!("OPERTR"),
-    used_proofs: symbol_short!("PRF_SET"),
+    operator: symbol_short!("OPERATOR"),
+    used_proofs: symbol_short!("PROOFS"),
+    processed_fintech_tx_ids: symbol_short!("FTX_IDS"),
 };
 
 // CONTRACT_VERSION is imported from shared
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum MintingError {
+    AlreadyInitialized = 5001,
+    InvalidFeeRate = 5002,
+    InvalidMintAmount = 5003,
+    InsufficientReserves = 5004,
+    ProofAlreadyUsed = 5005,
+    InvalidOracleRate = 5006,
+    UnauthorizedOperator = 5007,
+    DuplicateFintechTxId = 5008,
+    InvalidDripAmount = 5009,
+    DripExceedsCap = 5010,
+    InsufficientDemoCustody = 5011,
+    Paused = 5012,
+    OracleStale = 5013,
+    FintechTxIdEmpty = 5014,
+    FintechTxIdTooShort = 5015,
+    FintechTxIdTooLong = 5016,
+    FintechTxIdInvalidChar = 5017,
+    InvalidVersion = 5018,
+}
 
 #[contract]
 pub struct MintingContract;
@@ -92,13 +117,13 @@ impl MintingContract {
         fee_single_bps: i128,
     ) {
         if env.storage().instance().has(&DATA_KEY.admin) {
-            panic!("Contract already initialized");
+            env.panic_with_error(MintingError::AlreadyInitialized);
         }
 
         if !(0..=BASIS_POINTS).contains(&fee_rate_bps)
             || !(0..=BASIS_POINTS).contains(&fee_single_bps)
         {
-            panic!("Invalid fee rate");
+            env.panic_with_error(MintingError::InvalidFeeRate);
         }
 
         env.storage().instance().set(&DATA_KEY.admin, &admin);
@@ -153,7 +178,7 @@ impl MintingContract {
             .unwrap();
 
         if usdc_amount < min_amount || usdc_amount > max_amount {
-            panic!("Invalid mint amount");
+            env.panic_with_error(MintingError::InvalidMintAmount);
         }
 
         let acbu_token: Address = env.storage().instance().get(&DATA_KEY.acbu_token).unwrap();
@@ -194,7 +219,7 @@ impl MintingContract {
             vec![&env, projected_supply.into_val(&env)],
         );
         if !reserve_ok {
-            panic!("Insufficient reserves: minting would violate the minimum collateral ratio");
+            env.panic_with_error(MintingError::InsufficientReserves);
         }
 
         total_supply += acbu_amount;
@@ -205,6 +230,10 @@ impl MintingContract {
         let usdc_client = soroban_sdk::token::Client::new(&env, &usdc_token);
         usdc_client.transfer(&user, &env.current_contract_address(), &usdc_amount);
 
+        // C-038: `StellarAssetClient::mint` requires this contract to be the
+        // issuer or an authorized minter on the ACBU Stellar Asset Contract.
+        // The Soroban auth tree for this call is: admin/issuer → minting_contract.
+        // If this contract is not the SAC minter the call will revert.
         let acbu_sac = soroban_sdk::token::StellarAssetClient::new(&env, &acbu_token);
         acbu_sac.mint(&recipient, &acbu_amount);
 
@@ -242,7 +271,7 @@ impl MintingContract {
         Self::assert_recipient_is_account(&recipient);
 
         if !check_proof_unused(&env, &proof_id) {
-            panic!("Proof already used");
+            env.panic_with_error(MintingError::ProofAlreadyUsed);
         }
 
         let min_amount: i128 = env
@@ -256,7 +285,7 @@ impl MintingContract {
             .get(&DATA_KEY.max_mint_amount)
             .unwrap();
         if acbu_amount < min_amount || acbu_amount > max_amount {
-            panic!("Invalid mint amount");
+            env.panic_with_error(MintingError::InvalidMintAmount);
         }
 
         let acbu_token: Address = env.storage().instance().get(&DATA_KEY.acbu_token).unwrap();
@@ -297,7 +326,7 @@ impl MintingContract {
             vec![&env, projected_supply.into_val(&env)],
         );
         if !reserve_ok {
-            panic!("Insufficient reserves: minting would violate the minimum collateral ratio");
+            env.panic_with_error(MintingError::InsufficientReserves);
         }
 
         let currencies: soroban_sdk::Vec<CurrencyCode> = env.invoke_contract(
@@ -327,7 +356,7 @@ impl MintingContract {
                 vec![&env, currency.clone().into_val(&env)],
             );
             if rate == 0 {
-                panic!("Invalid oracle rate");
+                env.panic_with_error(MintingError::InvalidOracleRate);
             }
 
             let stoken: Address = env.invoke_contract(
@@ -345,6 +374,11 @@ impl MintingContract {
                 .and_then(|v| v.checked_div(rate))
                 .expect("Overflow in native_i calculation");
             if native_i > 0 {
+                // C-038: `transfer` pulls S-tokens from `user` into `vault`.
+                // This requires `user` to have pre-approved this contract as a
+                // spender (via `approve`) OR for the token to accept the
+                // invoking contract in the auth tree.  `user.require_auth()`
+                // above satisfies the Soroban auth propagation requirement.
                 let token = soroban_sdk::token::Client::new(&env, &stoken);
                 token.transfer(&user, &vault, &native_i);
             }
@@ -355,6 +389,10 @@ impl MintingContract {
             .instance()
             .set(&DATA_KEY.total_supply, &total_supply);
 
+        // C-038: `StellarAssetClient::mint` requires this contract to be the
+        // issuer or an authorized minter on the ACBU Stellar Asset Contract.
+        // The Soroban auth tree for this call is: admin/issuer → minting_contract.
+        // If this contract is not the SAC minter the call will revert.
         let acbu_sac = soroban_sdk::token::StellarAssetClient::new(&env, &acbu_token);
         acbu_sac.mint(&recipient, &net_mint);
         if fee_acbu > 0 {
@@ -441,7 +479,7 @@ impl MintingContract {
         check_oracle_freshness(&env, rate_timestamp, UPDATE_INTERVAL_SECONDS);
 
         if rate == 0 {
-            panic!("Invalid oracle rate");
+            env.panic_with_error(MintingError::InvalidOracleRate);
         }
 
         let usd_gross = s_token_amount
@@ -449,7 +487,7 @@ impl MintingContract {
             .and_then(|v| v.checked_div(DECIMALS))
             .expect("Overflow in usd_gross calculation");
         if usd_gross < min_amount || usd_gross > max_amount {
-            panic!("Invalid mint amount");
+            env.panic_with_error(MintingError::InvalidMintAmount);
         }
 
         let usd_after_fee = calculate_amount_after_fee(usd_gross, fee_single);
@@ -467,7 +505,7 @@ impl MintingContract {
             vec![&env, projected_supply.into_val(&env)],
         );
         if !reserve_ok {
-            panic!("Insufficient reserves: minting would violate the minimum collateral ratio");
+            env.panic_with_error(MintingError::InsufficientReserves);
         }
 
         let token = soroban_sdk::token::Client::new(&env, &expected_stoken);
@@ -512,7 +550,7 @@ impl MintingContract {
         Self::check_paused(&env);
         let expected_operator: Address = Self::get_operator(env.clone());
         if operator != expected_operator {
-            panic!("Unauthorized operator");
+            env.panic_with_error(MintingError::UnauthorizedOperator);
         }
         operator.require_auth();
         // C-058: reject contract-type recipients — minting to a contract address
@@ -520,7 +558,7 @@ impl MintingContract {
         Self::assert_recipient_is_account(&recipient);
 
         if !check_proof_unused(&env, &proof_id) {
-            panic!("Proof already used");
+            env.panic_with_error(MintingError::ProofAlreadyUsed);
         }
 
         let min_amount: i128 = env
@@ -575,7 +613,7 @@ impl MintingContract {
             .and_then(|v| v.checked_div(DECIMALS))
             .expect("Overflow in usd_gross calculation");
         if usd_gross < min_amount || usd_gross > max_amount {
-            panic!("Invalid mint amount");
+            env.panic_with_error(MintingError::InvalidMintAmount);
         }
 
         let usd_after_fee = calculate_amount_after_fee(usd_gross, fee_single);
@@ -593,7 +631,7 @@ impl MintingContract {
             vec![&env, projected_supply.into_val(&env)],
         );
         if !reserve_ok {
-            panic!("Insufficient reserves: minting would violate the minimum collateral ratio");
+            env.panic_with_error(MintingError::InsufficientReserves);
         }
 
         let custody = env.current_contract_address();
@@ -627,44 +665,9 @@ impl MintingContract {
         acbu_amount
     }
 
-    /// Testnet / ops: transfer demo basket S-token from custodial balance on this contract to
-    /// `recipient` (e.g. user faucet). Admin only; caps per call to limit abuse.
-    pub fn admin_drip_demo_fiat(
-        env: Env,
-        recipient: Address,
-        currency: CurrencyCode,
-        amount: i128,
-    ) {
-        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
-        admin.require_auth();
-        // C-058: reject contract-type recipients to prevent stranded token transfers.
-        Self::assert_recipient_is_account(&recipient);
-        if amount <= 0 {
-            panic!("Invalid drip amount");
-        }
-        const MAX_DRIP: i128 = 100_000_000_000_000; // 10M whole units at 7 decimals
-        if amount > MAX_DRIP {
-            panic!("Drip amount exceeds cap");
-        }
-
-        let oracle_addr: Address = env.storage().instance().get(&DATA_KEY.oracle).unwrap();
-        let stoken: Address = env.invoke_contract(
-            &oracle_addr,
-            &Symbol::new(&env, ORACLE_GET_S_TOKEN_ADDR),
-            vec![&env, currency.clone().into_val(&env)],
-        );
-        let custody = env.current_contract_address();
-        let token = soroban_sdk::token::Client::new(&env, &stoken);
-        let custody_balance = token.balance(&custody);
-        if custody_balance < amount {
-            panic!("Insufficient demo fiat custody balance");
-        }
-        token.transfer(&custody, &recipient, &amount);
-    }
-
-    /// General fiat mint: User/fintech provides fintech_tx_id; operator/backend signs.
-    /// Validates that the request is not duplicated and that rate/reserve checks pass.
-    /// This replaces the previous hardcoded 1:1 minting path with full oracle + reserve validation.
+    /// Fintech-partner fiat mint: operator (fintech backend) authorizes; validates fintech_tx_id
+    /// to prevent duplicate minting. Requires both operator authorization and valid fintech transaction.
+    /// This function enforces strict access control: only the operator (fintech partner) can call it.
     pub fn mint_from_fiat(
         env: Env,
         operator: Address,
@@ -675,24 +678,26 @@ impl MintingContract {
     ) -> i128 {
         Self::check_paused(&env);
         let expected_operator: Address = Self::get_operator(env.clone());
+
+        // Strict access control: only operator (fintech backend) can call
         if operator != expected_operator {
-            panic!("Unauthorized operator");
+            env.panic_with_error(MintingError::UnauthorizedOperator);
         }
         operator.require_auth();
-        // C-058: reject contract-type recipients — minting to a contract address
-        // that has no token-receipt logic would permanently strand the funds.
-        Self::assert_recipient_is_account(&recipient);
-        // Prevent self-minting: recipient cannot be the minter
-        if recipient == operator {
-            panic!("Recipient cannot be operator");
-        }
 
-        if fintech_tx_id.len() == 0 {
-            panic!("fintech_tx_id cannot be empty");
-        }
+        // C-039: Strict input validation — enforce length bounds and charset
+        // before touching any storage, so garbage IDs are rejected cheaply.
+        validate_fintech_tx_id(&env, &fintech_tx_id);
 
-        if !check_proof_unused(&env, &fintech_tx_id) {
-            panic!("Fiat transaction already processed");
+        // Check if fintech_tx_id has already been processed
+        let mut processed_ids: soroban_sdk::Map<SorobanString, bool> = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.processed_fintech_tx_ids)
+            .unwrap_or_else(|| soroban_sdk::map![&env]);
+
+        if processed_ids.contains_key(fintech_tx_id.clone()) {
+            env.panic_with_error(MintingError::DuplicateFintechTxId);
         }
 
         let min_amount: i128 = env
@@ -714,26 +719,23 @@ impl MintingContract {
             .get(&DATA_KEY.reserve_tracker)
             .unwrap();
         let vault: Address = env.storage().instance().get(&DATA_KEY.vault).unwrap();
-        let fee_single: i128 = env.storage().instance().get(&DATA_KEY.fee_single).unwrap();
+        let fee_rate: i128 = env.storage().instance().get(&DATA_KEY.fee_rate).unwrap();
+        let treasury: Address = env.storage().instance().get(&DATA_KEY.treasury).unwrap();
         let mut total_supply: i128 = env
             .storage()
             .instance()
             .get(&DATA_KEY.total_supply)
             .unwrap_or(0);
 
-        let expected_stoken: Address = env.invoke_contract(
-            &oracle_addr,
-            &Symbol::new(&env, ORACLE_GET_S_TOKEN_ADDR),
-            vec![&env, currency.clone().into_val(&env)],
-        );
-
-        // Get ACBU rate with timestamp and validate oracle freshness
-        let (acbu_rate, oracle_timestamp): (i128, u64) = env.invoke_contract(
+        // C-038: Use timestamped oracle reads and enforce freshness on every
+        // cross-contract rate call so a stale feed cannot be exploited to mint
+        // ACBU at an incorrect price.
+        let (acbu_rate, acbu_oracle_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
             &Symbol::new(&env, ORACLE_GET_ACBU_RATE_WITH_TS),
             vec![&env],
         );
-        check_oracle_freshness(&env, oracle_timestamp, UPDATE_INTERVAL_SECONDS);
+        check_oracle_freshness(&env, acbu_oracle_timestamp, UPDATE_INTERVAL_SECONDS);
 
         let (rate, rate_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
@@ -743,7 +745,7 @@ impl MintingContract {
         check_oracle_freshness(&env, rate_timestamp, UPDATE_INTERVAL_SECONDS);
 
         if rate == 0 {
-            panic!("Invalid oracle rate");
+            env.panic_with_error(MintingError::InvalidOracleRate);
         }
 
         let usd_gross = fiat_amount
@@ -751,10 +753,10 @@ impl MintingContract {
             .and_then(|v| v.checked_div(DECIMALS))
             .expect("Overflow in usd_gross calculation");
         if usd_gross < min_amount || usd_gross > max_amount {
-            panic!("Invalid mint amount");
+            env.panic_with_error(MintingError::InvalidMintAmount);
         }
 
-        let usd_after_fee = calculate_amount_after_fee(usd_gross, fee_single);
+        let usd_after_fee = calculate_amount_after_fee(usd_gross, fee_rate);
         let acbu_amount = usd_after_fee
             .checked_mul(DECIMALS)
             .and_then(|v| v.checked_div(acbu_rate))
@@ -769,13 +771,11 @@ impl MintingContract {
             vec![&env, projected_supply.into_val(&env)],
         );
         if !reserve_ok {
-            panic!("Insufficient reserves: minting would violate the minimum collateral ratio");
+            env.panic_with_error(MintingError::InsufficientReserves);
         }
 
-        // Pre-fund custody: the fiat amount is assumed to be held in the contract's balance before this call
-        let custody = env.current_contract_address();
-        let token = soroban_sdk::token::Client::new(&env, &expected_stoken);
-        token.transfer(&custody, &vault, &fiat_amount);
+        // For mint_from_fiat, fiat deposit is handled off-chain by the fintech partner.
+        // No on-chain token transfer needed; fintech validates and deposits fiat in their system.
 
         total_supply += acbu_amount;
         env.storage()
@@ -785,9 +785,19 @@ impl MintingContract {
         let acbu_sac = soroban_sdk::token::StellarAssetClient::new(&env, &acbu_token);
         acbu_sac.mint(&recipient, &acbu_amount);
 
-        let fee = calculate_fee(usd_gross, fee_single);
+        let fee = calculate_fee(usd_gross, fee_rate);
+        if fee > 0 {
+            acbu_sac.mint(&treasury, &fee);
+        }
+
+        // Mark fintech_tx_id as processed to prevent duplicate minting
+        processed_ids.set(fintech_tx_id.clone(), true);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.processed_fintech_tx_ids, &processed_ids);
+
         let mint_event = MintEvent {
-            transaction_id: fintech_tx_id.clone(),
+            transaction_id: fintech_tx_id,
             user: recipient.clone(),
             usdc_amount: usd_gross,
             acbu_amount,
@@ -798,8 +808,56 @@ impl MintingContract {
         env.events()
             .publish((symbol_short!("mint"), recipient), mint_event);
 
-        mark_proof_used(&env, &fintech_tx_id);
         acbu_amount
+    }
+
+    /// Helper to check if an address is authorized as operator (fintech backend).
+    /// Returns true if the address is the configured operator.
+    fn check_is_operator(env: &Env, address: &Address) -> bool {
+        let operator: Address = Self::get_operator(env.clone());
+        address == &operator
+    }
+
+    /// Helper to check if an address is authorized as admin.
+    /// Returns true if the address is the configured admin.
+    fn check_is_admin(env: &Env, address: &Address) -> bool {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        address == &admin
+    }
+
+    /// Testnet / ops: transfer demo basket S-token from custodial balance on this contract to
+    /// `recipient` (e.g. user faucet). Admin only; caps per call to limit abuse.
+    pub fn admin_drip_demo_fiat(
+        env: Env,
+        recipient: Address,
+        currency: CurrencyCode,
+        amount: i128,
+    ) {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        admin.require_auth();
+        // C-058: reject contract-type recipients to prevent stranded token transfers.
+        Self::assert_recipient_is_account(&recipient);
+        if amount <= 0 {
+            env.panic_with_error(MintingError::InvalidDripAmount);
+        }
+        const MAX_DRIP: i128 = 100_000_000_000_000; // 10M whole units at 7 decimals
+        if amount > MAX_DRIP {
+            env.panic_with_error(MintingError::DripExceedsCap);
+        }
+
+        let oracle_addr: Address = env.storage().instance().get(&DATA_KEY.oracle).unwrap();
+        let stoken: Address = env.invoke_contract(
+            &oracle_addr,
+            &Symbol::new(&env, ORACLE_GET_S_TOKEN_ADDR),
+            vec![&env, currency.clone().into_val(&env)],
+        );
+        let custody = env.current_contract_address();
+        let token = soroban_sdk::token::Client::new(&env, &stoken);
+        let custody_balance = token.balance(&custody);
+        if custody_balance < amount {
+            env.panic_with_error(MintingError::InsufficientDemoCustody);
+        }
+        token.transfer(&custody, &recipient, &amount);
     }
 
     pub fn get_operator(env: Env) -> Address {
@@ -813,6 +871,7 @@ impl MintingContract {
     pub fn set_operator(env: Env, new_operator: Address) {
         let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
         admin.require_auth();
+        Self::check_paused(&env);
         env.storage()
             .instance()
             .set(&DATA_KEY.operator, &new_operator);
@@ -821,6 +880,7 @@ impl MintingContract {
     pub fn sync_supply(env: Env, new_supply: i128) {
         let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
         admin.require_auth();
+        Self::check_paused(&env);
         env.storage()
             .instance()
             .set(&DATA_KEY.total_supply, &new_supply);
@@ -848,8 +908,9 @@ impl MintingContract {
     pub fn set_fee_rate(env: Env, fee_rate_bps: i128) {
         let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
         admin.require_auth();
+        Self::check_paused(&env);
         if !(0..=BASIS_POINTS).contains(&fee_rate_bps) {
-            panic!("Invalid fee rate");
+            env.panic_with_error(MintingError::InvalidFeeRate);
         }
         env.storage()
             .instance()
@@ -859,8 +920,9 @@ impl MintingContract {
     pub fn set_fee_single(env: Env, fee_single_bps: i128) {
         let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
         admin.require_auth();
+        Self::check_paused(&env);
         if !(0..=BASIS_POINTS).contains(&fee_single_bps) {
-            panic!("Invalid fee rate");
+            env.panic_with_error(MintingError::InvalidFeeRate);
         }
         env.storage()
             .instance()
@@ -882,6 +944,52 @@ impl MintingContract {
             .unwrap_or(false)
     }
 
+    // ── Dependency address updaters (admin only) ──────────────────────────
+
+    pub fn update_oracle(env: Env, new_oracle: Address) {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        admin.require_auth();
+        env.storage().instance().set(&DATA_KEY.oracle, &new_oracle);
+    }
+
+    pub fn update_reserve_tracker(env: Env, new_reserve_tracker: Address) {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.reserve_tracker, &new_reserve_tracker);
+    }
+
+    pub fn update_acbu_token(env: Env, new_acbu_token: Address) {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.acbu_token, &new_acbu_token);
+    }
+
+    pub fn update_vault(env: Env, new_vault: Address) {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        admin.require_auth();
+        env.storage().instance().set(&DATA_KEY.vault, &new_vault);
+    }
+
+    pub fn update_treasury(env: Env, new_treasury: Address) {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.treasury, &new_treasury);
+    }
+
+    pub fn update_usdc_token(env: Env, new_usdc_token: Address) {
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.usdc_token, &new_usdc_token);
+    }
+
     fn check_paused(env: &Env) {
         let paused: bool = env
             .storage()
@@ -889,7 +997,7 @@ impl MintingContract {
             .get(&DATA_KEY.paused)
             .unwrap_or(false);
         if paused {
-            panic!("Contract is paused");
+            env.panic_with_error(MintingError::Paused);
         }
     }
 
@@ -903,10 +1011,11 @@ impl MintingContract {
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>, new_version: u32) {
         let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
         admin.require_auth();
+        Self::check_paused(&env);
 
         let current_version = Self::get_version(env.clone());
         if new_version <= current_version {
-            panic!("Invalid version upgrade");
+            env.panic_with_error(MintingError::InvalidVersion);
         }
 
         env.deployer().update_current_contract_wasm(new_wasm_hash);
@@ -934,19 +1043,17 @@ fn migrate_v0_to_v1(_env: Env) {
 fn check_oracle_freshness(env: &Env, oracle_timestamp: u64, max_staleness_seconds: u64) {
     let current_time = env.ledger().timestamp();
     if current_time > oracle_timestamp.saturating_add(max_staleness_seconds) {
-        panic!("Oracle data is stale: last update was too long ago");
+        env.panic_with_error(MintingError::OracleStale);
     }
 }
 
 fn generate_unique_tx_id(env: &Env, _user: &Address, amount: i128, _prefix: &str) -> SorobanString {
     let timestamp = env.ledger().timestamp();
     let seq = env.ledger().sequence() as u64;
-    // Mix amount, timestamp, and sequence into a 64-bit hash (no alloc / format! needed).
     let hash = (amount as u64)
         .wrapping_mul(0x9e3779b97f4a7c15)
         .wrapping_add(timestamp.wrapping_mul(0x6c62272e07bb0142))
         .wrapping_add(seq);
-    // Encode as 16 hex chars using only stack memory — no format! or alloc.
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut buf = [0u8; 16];
     let mut h = hash;
@@ -988,4 +1095,59 @@ fn mark_proof_used(env: &Env, proof_id: &SorobanString) {
     env.storage()
         .persistent()
         .set(&(symbol_short!("PRF_SET"), proof_id.clone()), &true);
+}
+
+// ---------------------------------------------------------------------------
+// C-039: fintech_tx_id validation
+//
+// Rules enforced at the contract boundary:
+//   • Length: 8 – 64 characters (inclusive).
+//     - Minimum 8 prevents trivially short IDs that carry no entropy.
+//     - Maximum 64 caps storage cost and prevents DoS via huge strings.
+//   • Charset: ASCII alphanumeric (A-Z, a-z, 0-9), hyphen (-), underscore (_).
+//     Spaces, control characters, and non-ASCII bytes are all rejected.
+//     This matches the character set used by common fintech transaction ID
+//     schemes (UUIDs, Flutterwave, Paystack, etc.) and is safe for indexers.
+//
+// Panics with a descriptive message so the caller knows exactly which rule
+// was violated.
+// ---------------------------------------------------------------------------
+
+/// Minimum allowed length for a `fintech_tx_id`.
+const FINTECH_TX_ID_MIN_LEN: u32 = 8;
+/// Maximum allowed length for a `fintech_tx_id`.
+const FINTECH_TX_ID_MAX_LEN: u32 = 64;
+
+/// Validate a `fintech_tx_id` string against length and charset rules.
+///
+/// Panics if any rule is violated.
+fn validate_fintech_tx_id(env: &Env, id: &SorobanString) {
+    let len = id.len();
+
+    if len == 0 {
+        env.panic_with_error(MintingError::FintechTxIdEmpty);
+    }
+    if len < FINTECH_TX_ID_MIN_LEN {
+        env.panic_with_error(MintingError::FintechTxIdTooShort);
+    }
+    if len > FINTECH_TX_ID_MAX_LEN {
+        env.panic_with_error(MintingError::FintechTxIdTooLong);
+    }
+
+    // Validate charset: ASCII alphanumeric, hyphen, or underscore only.
+    // Copy into a fixed-size stack buffer (max 64 bytes, enforced above).
+    // FINTECH_TX_ID_MAX_LEN is 64, so this buffer is always large enough.
+    let mut buf = [0u8; 64];
+    let slice = &mut buf[..len as usize];
+    id.copy_into_slice(slice);
+
+    for &b in slice.iter() {
+        let valid = matches!(b,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'
+        );
+        if !valid {
+            env.panic_with_error(MintingError::FintechTxIdInvalidChar);
+        }
+    }
+    let _ = env; // env kept in signature for future on-chain logging
 }

@@ -1,8 +1,11 @@
 # Build artifacts
 /target/
 
-# Cargo lock (for libraries; keep for application crates if preferred)
-Cargo.lock
+# WASM artifacts — binary blobs must not be committed to source control.
+# The sha256 hash is already pinned in contractimport! macros; obtain the
+# file locally by running:  ./scripts/fetch_token_wasm.sh
+soroban_token_contract.wasm
+*.wasm
 
 # Editor/IDE files
 .idea/
@@ -19,7 +22,6 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 target/
-Cargo.lock
 **/*.rs.bk
 .soroban/
 .stellar/

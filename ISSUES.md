@@ -15,8 +15,8 @@ Issues found in the smart contracts (acbu_minting, acbu_burning, acbu_oracle, ac
 
 ## High
 
-7. **Term not enforced in savings vault** – acbu_savings_vault/src/lib.rs: `term_seconds` is stored but never checked on withdrawal. Users can deposit and withdraw immediately; there is no lock period.
-8. **No max amount check in `mint_from_fiat`** – acbu_minting/src/lib.rs: `mint_from_usdc` enforces `max_mint_amount`, but `mint_from_fiat` only checks `min_amount`, allowing unbounded minting.
+7. **Term not enforced in savings vault** – acbu_savings_vault/src/lib.rs: `term_seconds` is stored but never checked on withdrawal. Users can deposit and withdraw immediately; there is no lock period. ✅ **Resolved (#199):** `withdraw` only credits lots where `now >= lot.timestamp + lot.term_seconds` and rejects an under-matured `amount` with `InsufficientUnlocked`. Covered by `acbu_savings_vault/tests/test_lock_and_interest.rs` (`test_withdraw_before_term_fails`, `test_withdraw_one_second_before_term_fails`, `test_withdraw_at_exact_term_boundary_succeeds`).
+8. **No max amount check in `mint_from_fiat`** – acbu_minting/src/lib.rs: `mint_from_usdc` enforces `max_mint_amount`, but `mint_from_fiat` only checks `min_amount`, allowing unbounded minting. ✅ **Resolved (#200):** `mint_from_fiat` now loads `max_mint_amount` and rejects `usd_gross > max_amount` (and `< min_amount`) with `InvalidMintAmount`, matching `mint_from_usdc`. Covered by `acbu_minting/tests/test_mint_from_fiat.rs::test_mint_from_fiat_above_max_amount`.
 9. **Integer division truncation in `burn_for_basket`** – acbu_burning/src/lib.rs: `amount_per_account = acbu_after_fee / (recipient_accounts.len() as i128)` truncates. With many recipients, dust is lost and never accounted for.
 10. **No duplicate escrow check** – acbu_escrow/src/lib.rs: `create` does not check if `escrow_id` already exists. Overwriting an existing escrow can lock prior funds.
 11. **Oracle and reserve tracker unused in minting** – acbu_minting/src/lib.rs: `oracle` and `reserve_tracker` are loaded but never called. Rates are hardcoded to 1:1 and reserve checks are skipped.
@@ -26,8 +26,8 @@ Issues found in the smart contracts (acbu_minting, acbu_burning, acbu_oracle, ac
 
 13. **Token WASM import uses zero SHA256** – In acbu_minting, acbu_burning, and acbu_reserve_tracker, `soroban_token_contract.wasm` is imported with `sha256 = "0x0000...0"`. This is a placeholder; production builds should use the real WASM hash for integrity and security.
 14. **Double `.unwrap().unwrap()` in escrow** – acbu_escrow/src/lib.rs: Multiple storage reads use `.get(...).unwrap().unwrap()`. Storage `get` returns `Option<T>`, so a single `.unwrap()` is expected. The second `.unwrap()` may panic or indicate a type mismatch.
-15. **Double `.unwrap().unwrap()` in savings vault** – acbu_savings_vault/src/lib.rs: Same problematic double-unwrap pattern.
-16. **Double `.unwrap().unwrap()` in lending pool** – acbu_lending_pool/src/lib.rs: Same pattern.
+15. **Double `.unwrap().unwrap()` in savings vault** – acbu_savings_vault/src/lib.rs: Same problematic double-unwrap pattern. ✅ **Resolved (#210):** no chained `.unwrap().unwrap()` remains; storage reads use `unwrap_or_else(|e| env.panic_with_error(e))` / explicit error handling.
+16. **Double `.unwrap().unwrap()` in lending pool** – acbu_lending_pool/src/lib.rs: Same pattern. ✅ **Resolved (#211):** no chained `.unwrap().unwrap()` remains; storage reads use safe `unwrap_or_else` / explicit error handling.
 17. **Outlier detection has no effect in oracle** – acbu_oracle/src/lib.rs: Outliers are detected but only marked with a comment "Log outlier but continue with median". No logging, rejection, or alert occurs.
 18. **Incorrect oracle test assertion** – acbu_oracle/tests/test.rs: Test expects `stored_rate == rate` (1234567), but the contract stores `median(sources)` (1235000). The test will fail.
 19. **Redundant calculation in burning** – acbu_burning/src/lib.rs: `(acbu_after_fee * DECIMALS) / DECIMALS` is equivalent to `acbu_after_fee`; the multiplication and division cancel out.
