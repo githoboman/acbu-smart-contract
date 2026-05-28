@@ -1,7 +1,10 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    Symbol, Vec,
+};
 
-use shared::{calculate_fee, BASIS_POINTS, CONTRACT_VERSION, DataKey as SharedDataKey};
+use shared::{calculate_fee, DataKey as SharedDataKey, BASIS_POINTS, CONTRACT_VERSION};
 
 mod shared {
     pub use shared::*;
@@ -28,6 +31,7 @@ pub enum Error {
     InvalidYieldRate = 1012,
     NoFeeRate = 1013,
     NoYieldRate = 1014,
+    ZeroNetDeposit = 1015,
 }
 
 // ---------------------------------------------------------------------------
@@ -156,11 +160,19 @@ impl SavingsVault {
             return Err(Error::InvalidYieldRate);
         }
         env.storage().instance().set(&DATA_KEY.admin, &admin);
-        env.storage().instance().set(&DATA_KEY.acbu_token, &acbu_token);
-        env.storage().instance().set(&DATA_KEY.fee_rate, &fee_rate_bps);
-        env.storage().instance().set(&DATA_KEY.yield_rate, &yield_rate_bps);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.acbu_token, &acbu_token);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.fee_rate, &fee_rate_bps);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.yield_rate, &yield_rate_bps);
         env.storage().instance().set(&DATA_KEY.paused, &false);
-        env.storage().instance().set(&SharedDataKey::Version, &CONTRACT_VERSION);
+        env.storage()
+            .instance()
+            .set(&SharedDataKey::Version, &CONTRACT_VERSION);
         Ok(())
     }
 
@@ -190,7 +202,7 @@ impl SavingsVault {
 
         // Guard against fee consuming entire deposit.
         if net_amount <= 0 {
-            return Err(soroban_sdk::Error::from_contract_error(ERR_ZERO_NET_DEPOSIT));
+            return Err(Error::ZeroNetDeposit);
         }
 
         let acbu = Self::load_acbu_token(&env)?;
@@ -210,7 +222,7 @@ impl SavingsVault {
             .get(&key)
             .unwrap_or(Vec::new(&env));
         lots.push_back(DepositLot {
-                        //Store net_amount instead of gross amount.
+            //Store net_amount instead of gross amount.
             amount: net_amount,
             timestamp: env.ledger().timestamp(),
             term_seconds,
@@ -234,12 +246,7 @@ impl SavingsVault {
     }
 
     /// Withdraw (unlock) ACBU after term. Applies the stored protocol fee.
-    pub fn withdraw(
-        env: Env,
-        user: Address,
-        term_seconds: u64,
-        amount: i128,
-    ) -> Result<(), Error> {
+    pub fn withdraw(env: Env, user: Address, term_seconds: u64, amount: i128) -> Result<(), Error> {
         user.require_auth();
 
         if Self::is_paused(&env) {
@@ -260,11 +267,8 @@ impl SavingsVault {
         let unlocked_balance: i128 = lots
             .iter()
             .filter(|lot| now >= lot.timestamp.saturating_add(lot.term_seconds))
-            .fold(Ok(0i128), |acc: Result<i128, soroban_sdk::Error>, lot| {
-                acc.and_then(|a| {
-                    a.checked_add(lot.amount)
-                        .ok_or(soroban_sdk::Error::from_contract_error(1005))
-                })
+            .fold(Ok(0i128), |acc: Result<i128, Error>, lot| {
+                acc.and_then(|a| a.checked_add(lot.amount).ok_or(Error::Overflow))
             })?;
 
         if unlocked_balance < amount {
@@ -272,9 +276,8 @@ impl SavingsVault {
         }
 
         // Removed load_fee_rate and calculate_fee. Fee no longer charged on withdraw.
-        
+
         let yield_rate = Self::load_yield_rate(&env)?;
-        
 
         let mut amount_left = amount;
         let mut updated_lots = Vec::new(&env);
@@ -293,20 +296,21 @@ impl SavingsVault {
             if lot.amount <= amount_left {
                 amount_left = amount_left
                     .checked_sub(lot.amount)
-                    .ok_or(soroban_sdk::Error::from_contract_error(1004))?;
+                    .ok_or(Error::AccountingError)?;
                 let elapsed = now.saturating_sub(lot.timestamp);
                 yield_amount = yield_amount
                     .checked_add(Self::calculate_yield(lot.amount, yield_rate, elapsed)?)
-                    .ok_or(soroban_sdk::Error::from_contract_error(1005))?;
+                    .ok_or(Error::Overflow)?;
             } else {
                 let consumed = amount_left;
-                let remaining = lot.amount
+                let remaining = lot
+                    .amount
                     .checked_sub(consumed)
-                    .ok_or(soroban_sdk::Error::from_contract_error(1004))?;
+                    .ok_or(Error::AccountingError)?;
                 let elapsed = now.saturating_sub(lot.timestamp);
                 yield_amount = yield_amount
                     .checked_add(Self::calculate_yield(consumed, yield_rate, elapsed)?)
-                    .ok_or(soroban_sdk::Error::from_contract_error(1005))?;
+                    .ok_or(Error::Overflow)?;
                 updated_lots.push_back(DepositLot {
                     amount: remaining,
                     timestamp: lot.timestamp,
@@ -326,12 +330,10 @@ impl SavingsVault {
             env.storage().temporary().set(&key, &updated_lots);
         }
 
-        let net_amount: i128 = amount
-            .checked_sub(fee_amount)
-            .ok_or(soroban_sdk::Error::from_contract_error(1004))?;
+        let net_amount: i128 = amount;
         let payout_amount: i128 = net_amount
             .checked_add(yield_amount)
-            .ok_or(soroban_sdk::Error::from_contract_error(1005))?;
+            .ok_or(Error::Overflow)?;
 
         // Single storage read for the token — reuse the client for both transfers.
         let acbu = Self::load_acbu_token(&env)?;
@@ -363,13 +365,17 @@ impl SavingsVault {
         Self::sum_lots(&lots)
     }
 
-        pub fn get_pending_yield(env: Env, user: Address, term_seconds: u64) -> Result<i128, soroban_sdk::Error> {
+    pub fn get_pending_yield(
+        env: Env,
+        user: Address,
+        term_seconds: u64,
+    ) -> Result<i128, soroban_sdk::Error> {
         let key = (DEPOSIT_KEY, user, term_seconds);
         let lots: Vec<DepositLot> = env
-           .storage()
-           .temporary()
-           .get(&key)
-           .unwrap_or(Vec::new(&env));
+            .storage()
+            .temporary()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
 
         let now = env.ledger().timestamp();
         let yield_rate = Self::load_yield_rate(&env)?;
@@ -377,7 +383,7 @@ impl SavingsVault {
 
         for lot in lots.iter() {
             let unlocked = now >= lot.timestamp.saturating_add(lot.term_seconds);
-            if!unlocked {
+            if !unlocked {
                 continue;
             }
             let elapsed = now.saturating_sub(lot.timestamp);
@@ -401,11 +407,17 @@ impl SavingsVault {
     }
 
     pub fn get_version(env: Env) -> u32 {
-        env.storage().instance().get(&SharedDataKey::Version).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&SharedDataKey::Version)
+            .unwrap_or(0)
     }
 
-
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>, new_version: u32) -> Result<(), soroban_sdk::Error> {
+    pub fn upgrade(
+        env: Env,
+        new_wasm_hash: BytesN<32>,
+        new_version: u32,
+    ) -> Result<(), soroban_sdk::Error> {
         let admin = Self::load_admin(&env)?;
         admin.require_auth();
 
@@ -424,15 +436,11 @@ impl SavingsVault {
             }
         }
 
-        env.storage().instance().set(&SharedDataKey::Version, &new_version);
+        env.storage()
+            .instance()
+            .set(&SharedDataKey::Version, &new_version);
         Ok(())
     }
-}
-
-fn migrate_v0_to_v1(_env: Env) {
-    // Migration logic
-}
-
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
@@ -459,4 +467,8 @@ fn migrate_v0_to_v1(_env: Env) {
             .ok_or(Error::Overflow)?;
         Ok(numerator / (BASIS_POINTS * SECONDS_PER_YEAR))
     }
+}
+
+fn migrate_v0_to_v1(_env: Env) {
+    // Migration logic
 }

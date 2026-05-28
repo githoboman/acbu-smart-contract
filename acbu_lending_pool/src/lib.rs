@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol,
 };
 
 use shared::{DataKey as SharedDataKey, BASIS_POINTS, CONTRACT_VERSION};
@@ -89,7 +89,7 @@ pub struct RepaymentEvent {
     pub timestamp: u64,
 }
 
-#[contracttype]
+#[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum Error {
@@ -247,14 +247,33 @@ impl LendingPool {
 
         env.storage().temporary().set(&key, &loan);
 
+        let timestamp = env.ledger().timestamp();
+        let fee_rate: i128 = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.fee_rate)
+            .unwrap_or(0);
+
         env.events().publish(
             (symbol_short!("borrow"),),
             BorrowEvent {
                 creator: borrower.clone(),
                 amount,
-                token: acbu,
+                token: acbu.clone(),
                 loan_id,
-                timestamp: env.ledger().timestamp(),
+                timestamp,
+            },
+        );
+        env.events().publish(
+            (symbol_short!("loan_cr"),),
+            LoanCreatedEvent {
+                loan_id,
+                lender: env.current_contract_address(),
+                borrower,
+                amount,
+                interest_bps: fee_rate,
+                term_seconds: 0,
+                timestamp,
             },
         );
 
@@ -287,6 +306,7 @@ impl LendingPool {
             env.storage().temporary().set(&key, &loan);
         }
 
+        let timestamp = env.ledger().timestamp();
         env.events().publish(
             (symbol_short!("repay"),),
             RepayEvent {
@@ -294,7 +314,24 @@ impl LendingPool {
                 amount,
                 token: acbu,
                 loan_id,
-                timestamp: env.ledger().timestamp(),
+                timestamp,
+            },
+        );
+        env.events().publish(
+            (symbol_short!("repaymt"),),
+            RepaymentEvent {
+                borrower: borrower.clone(),
+                amount,
+                timestamp,
+            },
+        );
+        env.events().publish(
+            (symbol_short!("loan_rp"),),
+            LoanRepaidEvent {
+                loan_id,
+                borrower,
+                amount,
+                timestamp,
             },
         );
 

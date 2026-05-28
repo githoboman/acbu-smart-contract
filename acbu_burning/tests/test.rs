@@ -139,6 +139,10 @@ fn test_redeem_single_transfers_stoken() {
     let currency = CurrencyCode::new(&env, "NGN");
     let out = client.redeem_single(&user, &recipient, &burn_amt, &currency);
     assert!(out > 0);
+    assert_eq!(token.balance(&recipient), out);
+
+    let acbu = soroban_sdk::token::Client::new(&env, &acbu_token);
+    assert_eq!(acbu.balance(&user), 0);
 }
 
 #[test]
@@ -199,7 +203,14 @@ fn test_redeem_basket() {
     let net = burn_amt - expected_fee;
     // Per-currency integer division can lose at most 1 unit per currency in rounding.
     assert!(total_out <= net, "total_out should not exceed net");
-    assert!(total_out >= net - amounts.len() as i128, "rounding loss bounded by currency count");
+    assert!(
+        total_out >= net - amounts.len() as i128,
+        "rounding loss bounded by currency count"
+    );
+    assert_eq!(token.balance(&recipient), total_out);
+
+    let acbu = soroban_sdk::token::Client::new(&env, &acbu_token);
+    assert_eq!(acbu.balance(&user), 0);
 }
 
 // --- Upgrade path tests (issue #242) ---
@@ -243,7 +254,10 @@ fn test_upgrade_rejects_same_version() {
     env.mock_all_auths();
     let (_admin, _contract_id, client) = setup_burning_client(&env);
     // version is 1 after init; trying to upgrade to 1 must be rejected
-    let dummy_hash: BytesN<32> = bytesn!(&env, 0x0000000000000000000000000000000000000000000000000000000000000000);
+    let dummy_hash: BytesN<32> = bytesn!(
+        &env,
+        0x0000000000000000000000000000000000000000000000000000000000000000
+    );
     client.upgrade(&dummy_hash, &1u32);
 }
 
@@ -253,7 +267,10 @@ fn test_upgrade_rejects_lower_version() {
     let env = Env::default();
     env.mock_all_auths();
     let (_admin, _contract_id, client) = setup_burning_client(&env);
-    let dummy_hash: BytesN<32> = bytesn!(&env, 0x0000000000000000000000000000000000000000000000000000000000000000);
+    let dummy_hash: BytesN<32> = bytesn!(
+        &env,
+        0x0000000000000000000000000000000000000000000000000000000000000000
+    );
     client.upgrade(&dummy_hash, &0u32);
 }
 
