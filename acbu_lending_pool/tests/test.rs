@@ -1,5 +1,11 @@
 #![cfg(test)]
 
+use acbu_lending_pool::{BorrowEvent, LendingPool, LendingPoolClient, RepayEvent};
+use soroban_sdk::{
+    symbol_short, testutils::Address as _, testutils::Events, Address, Env, TryIntoVal,
+};
+// Add these imports for the lifecycle test
+use soroban_sdk::token::StellarAssetClient;
 use acbu_lending_pool::{BorrowEvent, RepayEvent, LendingPool, LendingPoolClient};
 use soroban_sdk::{symbol_short, testutils::{Address as _, Events}, Address, Env, TryIntoVal};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};

@@ -1,5 +1,6 @@
 #![no_std]
 use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol,
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
 };
 
@@ -58,6 +59,35 @@ pub struct RepayEvent {
     pub amount: i128,
     pub token: Address,
     pub loan_id: u64,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct LoanCreatedEvent {
+    pub loan_id: u64,
+    pub lender: Address,
+    pub borrower: Address,
+    pub amount: i128,
+    pub interest_bps: i128,
+    pub term_seconds: u64,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct LoanRepaidEvent {
+    pub loan_id: u64,
+    pub borrower: Address,
+    pub amount: i128,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RepaymentEvent {
+    pub borrower: Address,
+    pub amount: i128,
     pub timestamp: u64,
 }
 
@@ -237,14 +267,34 @@ impl LendingPool {
             .persistent()
             .set(&DataKey::Loan(loan_key), &loan_data);
 
+        let timestamp = env.ledger().timestamp();
+        let fee_rate: i128 = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.fee_rate)
+            .unwrap_or(0);
+
         env.events().publish(
             (symbol_short!("borrow"), borrower.clone()),
             BorrowEvent {
                 creator: borrower,
                 amount,
+                token: acbu.clone(),
                 token: acbu_token,
                 loan_id,
-                timestamp: env.ledger().timestamp(),
+                timestamp,
+            },
+        );
+        env.events().publish(
+            (symbol_short!("loan_cr"),),
+            LoanCreatedEvent {
+                loan_id,
+                lender: env.current_contract_address(),
+                borrower,
+                amount,
+                interest_bps: fee_rate,
+                term_seconds: 0,
+                timestamp,
             },
         );
     }
@@ -321,6 +371,7 @@ impl LendingPool {
                 .set(&DataKey::Loan(loan_key), &loan_data);
         }
 
+        let timestamp = env.ledger().timestamp();
         env.events().publish(
             (symbol_short!("repay"), borrower.clone()),
             RepayEvent {
@@ -328,7 +379,24 @@ impl LendingPool {
                 amount,
                 token: acbu_token,
                 loan_id,
-                timestamp: env.ledger().timestamp(),
+                timestamp,
+            },
+        );
+        env.events().publish(
+            (symbol_short!("repaymt"),),
+            RepaymentEvent {
+                borrower: borrower.clone(),
+                amount,
+                timestamp,
+            },
+        );
+        env.events().publish(
+            (symbol_short!("loan_rp"),),
+            LoanRepaidEvent {
+                loan_id,
+                borrower,
+                amount,
+                timestamp,
             },
         );
     }

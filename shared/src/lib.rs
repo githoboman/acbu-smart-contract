@@ -160,7 +160,10 @@ pub struct MintEvent {
 pub struct BurnEvent {
     pub transaction_id: SorobanString,
     pub user: Address,
+    /// Gross ACBU amount submitted for redemption (before fee deduction).
     pub acbu_amount: i128,
+    /// Net ACBU after fee deduction (acbu_amount - fee). Emitted so indexers can
+    /// verify acbu_amount - fee == net_acbu without re-deriving off-chain.
     pub net_acbu: i128,
     pub local_amount: i128,
     pub currency: CurrencyCode,
@@ -211,6 +214,17 @@ pub enum ContractError {
     /// WASM upgrade rejected: `new_version` must be greater than the stored version.
     InvalidVersion = 12,
 }
+
+/// Cross-contract method name constants — prevents silent logic splits from typos
+/// when the same string is used in multiple contracts to call shared interfaces.
+pub const ORACLE_GET_ACBU_RATE: &str = "get_acbu_usd_rate";
+pub const ORACLE_GET_ACBU_RATE_WITH_TS: &str = "get_acbu_usd_rate_with_timestamp";
+pub const ORACLE_GET_RATE: &str = "get_rate";
+pub const ORACLE_GET_RATE_WITH_TS: &str = "get_rate_with_timestamp";
+pub const ORACLE_GET_CURRENCIES: &str = "get_currencies";
+pub const ORACLE_GET_BASKET_WEIGHT: &str = "get_basket_weight";
+pub const ORACLE_GET_S_TOKEN_ADDR: &str = "get_s_token_address";
+pub const RESERVE_IS_SUFFICIENT: &str = "is_reserve_sufficient";
 
 /// Constants
 pub const BASIS_POINTS: i128 = 10_000;
