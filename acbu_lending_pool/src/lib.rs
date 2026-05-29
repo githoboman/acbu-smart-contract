@@ -1,10 +1,9 @@
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol,
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
 };
 
-use shared::{DataKey as SharedDataKey, BASIS_POINTS, CONTRACT_VERSION};
+use shared::{DataKey as SharedDataKey, BASIS_POINTS, CONTRACT_VERSION, reentrancy_guard};
 
 #[contracttype]
 #[derive(Clone)]
@@ -140,6 +139,9 @@ impl LendingPool {
     }
 
     pub fn deposit(env: Env, lender: Address, amount: i128) {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         lender.require_auth();
         Self::check_not_paused(&env);
 
@@ -148,9 +150,8 @@ impl LendingPool {
         }
 
         let acbu_token: Address = env.storage().instance().get(&DataKey::AcbuToken).unwrap();
-        let token = soroban_sdk::token::Client::new(&env, &acbu_token);
-        token.transfer(&lender, &env.current_contract_address(), &amount);
 
+        // CEI: Update state before external calls
         let current_balance: i128 = env
             .storage()
             .persistent()
@@ -163,11 +164,20 @@ impl LendingPool {
             .persistent()
             .set(&DataKey::Balance(lender.clone()), &new_balance);
 
+        let token = soroban_sdk::token::Client::new(&env, &acbu_token);
+        token.transfer(&lender, &env.current_contract_address(), &amount);
+
         env.events()
             .publish((symbol_short!("deposit"), lender), amount);
+
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
     }
 
     pub fn withdraw(env: Env, lender: Address, amount: i128) {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         lender.require_auth();
         Self::check_not_paused(&env);
 
@@ -190,19 +200,18 @@ impl LendingPool {
         let acbu_token: Address = env.storage().instance().get(&DataKey::AcbuToken).unwrap();
         let token = soroban_sdk::token::Client::new(&env, &acbu_token);
         let contract_balance = token.balance(&env.current_contract_address());
-        
+
         // ensure we don't withdraw collateral or loaned out funds
-        // The contract balance must remain at least active_loans_liquidity 
+        // The contract balance must remain at least active_loans_liquidity
         // (plus any locked collateral, but locked collateral isn't part of withdrawable liquidity anyway)
         // Wait, available liquidity = contract_balance - active_loans_liquidity
         // No, available_liquidity = total_deposits - active_loans_liquidity.
         // It's safer to just check available liquidity.
-        // Let's assume the contract balance tracks all deposited + collateral. 
+        // Let's assume the contract balance tracks all deposited + collateral.
         // If we just check `contract_balance - active_loans_liquidity`, we might accidentally let them withdraw collateral.
         // To be perfectly safe, we should track total_deposits explicitly, or just ensure `amount <= total_deposits - active_loans_liquidity`.
-        
-        token.transfer(&env.current_contract_address(), &lender, &amount);
 
+        // CEI: Update state before external calls
         let new_balance = current_balance
             .checked_sub(amount)
             .unwrap_or_else(|| env.panic_with_error(Error::InsufficientBalance));
@@ -210,8 +219,13 @@ impl LendingPool {
             .persistent()
             .set(&DataKey::Balance(lender.clone()), &new_balance);
 
+        token.transfer(&env.current_contract_address(), &lender, &amount);
+
         env.events()
             .publish((symbol_short!("withdraw"), lender), amount);
+
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
     }
 
     pub fn borrow(
@@ -221,6 +235,9 @@ impl LendingPool {
         collateral_amount: i128,
         loan_id: u64,
     ) {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         borrower.require_auth();
         Self::check_not_paused(&env);
 
@@ -246,12 +263,13 @@ impl LendingPool {
             env.panic_with_error(Error::InsufficientBalance);
         }
 
+        // CEI: Update state before external calls
+        let active_loans_liquidity: i128 = env.storage().instance().get(&DataKey::ActiveLoansLiquidity).unwrap_or(0);
+        env.storage().instance().set(&DataKey::ActiveLoansLiquidity, &(active_loans_liquidity + amount));
+
         // Pull collateral in BEFORE paying out the loan principal.
         token.transfer(&borrower, &env.current_contract_address(), &collateral_amount);
         token.transfer(&env.current_contract_address(), &borrower, &amount);
-        
-        let active_loans_liquidity: i128 = env.storage().instance().get(&DataKey::ActiveLoansLiquidity).unwrap_or(0);
-        env.storage().instance().set(&DataKey::ActiveLoansLiquidity, &(active_loans_liquidity + amount));
 
         let fee_rate_bps: i128 = env.storage().instance().get(&DataKey::FeeRate).unwrap_or(0);
         let start_time = env.ledger().timestamp();
@@ -275,7 +293,7 @@ impl LendingPool {
         let fee_rate: i128 = env
             .storage()
             .instance()
-            .get(&DATA_KEY.fee_rate)
+            .get(&DataKey::FeeRate)
             .unwrap_or(0);
 
         env.events().publish(
@@ -283,7 +301,6 @@ impl LendingPool {
             BorrowEvent {
                 creator: borrower,
                 amount,
-                token: acbu.clone(),
                 token: acbu_token,
                 loan_id,
                 timestamp,
@@ -301,6 +318,9 @@ impl LendingPool {
                 timestamp,
             },
         );
+
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
     }
 
     pub fn get_loan(env: Env, borrower: Address, loan_id: u64) -> Option<LoanData> {
@@ -329,6 +349,9 @@ impl LendingPool {
     }
 
     pub fn repay(env: Env, borrower: Address, amount: i128, loan_id: u64) {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         borrower.require_auth();
         Self::check_not_paused(&env);
 
@@ -346,7 +369,6 @@ impl LendingPool {
 
         let acbu_token: Address = env.storage().instance().get(&DataKey::AcbuToken).unwrap();
         let token = soroban_sdk::token::Client::new(&env, &acbu_token);
-        token.transfer(&borrower, &env.current_contract_address(), &amount);
 
         let principal_repaid = if amount > loan_data.accrued_interest {
             amount - loan_data.accrued_interest
@@ -354,10 +376,13 @@ impl LendingPool {
             0
         };
 
+        // CEI: Update state before external calls
         loan_data.amount = loan_data.amount.checked_sub(principal_repaid).unwrap_or(0);
-        
+
         let active_loans_liquidity: i128 = env.storage().instance().get(&DataKey::ActiveLoansLiquidity).unwrap_or(0);
         env.storage().instance().set(&DataKey::ActiveLoansLiquidity, &active_loans_liquidity.checked_sub(principal_repaid).unwrap_or(0));
+
+        token.transfer(&borrower, &env.current_contract_address(), &amount);
 
         if loan_data.amount == 0 {
             if loan_data.collateral_amount > 0 {
@@ -414,6 +439,9 @@ impl LendingPool {
                 timestamp,
             },
         );
+
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
     }
 
     pub fn pause(env: Env) {

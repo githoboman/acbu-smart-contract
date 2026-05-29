@@ -4,7 +4,7 @@ use soroban_sdk::{
     Symbol, Vec,
 };
 
-use shared::{calculate_fee, DataKey as SharedDataKey, BASIS_POINTS, CONTRACT_VERSION};
+use shared::{calculate_fee, DataKey as SharedDataKey, reentrancy_guard, BASIS_POINTS, CONTRACT_VERSION};
 
 mod shared {
     pub use shared::*;
@@ -186,6 +186,9 @@ impl SavingsVault {
 
     /// Deposit (lock) ACBU for a term. User transfers ACBU to this contract.
     pub fn deposit(env: Env, user: Address, amount: i128, term_seconds: u64) -> i128 {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         user.require_auth();
 
         if Self::is_paused(&env) {
@@ -251,11 +254,17 @@ impl SavingsVault {
             },
         );
 
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
+
         net_amount
     }
 
     /// Withdraw unlocked ACBU + yield for a specific term.
     pub fn withdraw(env: Env, user: Address, term_seconds: u64, amount: i128) -> i128 {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         user.require_auth();
 
         if Self::is_paused(&env) {
@@ -368,6 +377,9 @@ impl SavingsVault {
                 timestamp: now,
             },
         );
+
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
 
         payout_amount
     }
