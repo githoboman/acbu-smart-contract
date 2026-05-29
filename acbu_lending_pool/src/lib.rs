@@ -113,6 +113,10 @@ pub struct LendingPool;
 
 #[contractimpl]
 impl LendingPool {
+    /// Initialize the pool.
+    ///
+    /// `fee_rate_bps` is the annualized loan fee rate in basis points. It is
+    /// snapshotted into each loan and accrued into `total_repayment_due`.
     pub fn initialize(env: Env, admin: Address, acbu_token: Address, fee_rate_bps: i128) {
         if env.storage().instance().has(&DataKey::Admin) {
             env.panic_with_error(Error::AlreadyInitialized);
@@ -322,17 +326,25 @@ impl LendingPool {
     pub fn get_loan(env: Env, borrower: Address, loan_id: u64) -> Option<LoanData> {
         let loan_key = LoanId(borrower, loan_id);
         let mut loan_data: LoanData = env.storage().persistent().get(&DataKey::Loan(loan_key))?;
-        
+
         let current_time = env.ledger().timestamp();
         let elapsed = current_time.saturating_sub(loan_data.loan_start_timestamp);
-        
-        let year_secs: u64 = 365 * 24 * 60 * 60;
-        let new_interest = (loan_data.amount as i128 * loan_data.interest_rate_bps as i128 * elapsed as i128) 
-            / (10000 * year_secs as i128);
-            
-        loan_data.accrued_interest += new_interest;
-        loan_data.total_repayment_due = loan_data.amount + loan_data.accrued_interest;
-        
+
+        let accrued_fee = Self::calculate_accrued_fee(
+            &env,
+            loan_data.amount,
+            loan_data.interest_rate_bps,
+            elapsed,
+        );
+        loan_data.accrued_interest = loan_data
+            .accrued_interest
+            .checked_add(accrued_fee)
+            .unwrap_or_else(|| env.panic_with_error(Error::InvalidAmount));
+        loan_data.total_repayment_due = loan_data
+            .amount
+            .checked_add(loan_data.accrued_interest)
+            .unwrap_or_else(|| env.panic_with_error(Error::InvalidAmount));
+
         Some(loan_data)
     }
 
@@ -389,8 +401,11 @@ impl LendingPool {
                 0
             };
             loan_data.accrued_interest = remaining_interest;
-            loan_data.total_repayment_due = loan_data.amount + remaining_interest;
-            
+            loan_data.total_repayment_due = loan_data
+                .amount
+                .checked_add(remaining_interest)
+                .unwrap_or_else(|| env.panic_with_error(Error::InvalidAmount));
+
             env.storage()
                 .persistent()
                 .set(&DataKey::Loan(loan_key), &loan_data);
@@ -542,6 +557,21 @@ impl LendingPool {
         if paused {
             env.panic_with_error(Error::Paused);
         }
+    }
+
+    fn calculate_accrued_fee(
+        env: &Env,
+        principal: i128,
+        fee_rate_bps: u32,
+        elapsed_seconds: u64,
+    ) -> i128 {
+        const SECONDS_PER_YEAR: i128 = 31_536_000;
+
+        principal
+            .checked_mul(i128::from(fee_rate_bps))
+            .and_then(|v| v.checked_mul(i128::from(elapsed_seconds)))
+            .and_then(|v| v.checked_div(BASIS_POINTS * SECONDS_PER_YEAR))
+            .unwrap_or_else(|| env.panic_with_error(Error::InvalidAmount))
     }
 }
 
