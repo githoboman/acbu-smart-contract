@@ -86,6 +86,13 @@ impl ReserveTrackerContract {
         )
     }
 
+    /// Verify that on-chain reserves are sufficient to back the circulating ACBU supply.
+    ///
+    /// Total supply is obtained by cross-contract-calling `get_total_supply` on the
+    /// registered ACBU token contract.  Previously this used
+    /// `acbu_client.balance(&env.current_contract_address())`, which always returned 0
+    /// because the reserve tracker holds no ACBU — causing reserve checks to be skipped
+    /// entirely (fix for issue #193).
     pub fn verify_reserves(env: Env) -> bool {
         let total_acbu_supply = Self::get_total_supply_from_token(&env);
         if total_acbu_supply == 0 {
