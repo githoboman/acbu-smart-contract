@@ -5,6 +5,10 @@ use soroban_sdk::{
 };
 
 use shared::{
+    calculate_fee, BurnEvent, CurrencyCode, DataKey as SharedDataKey, BASIS_POINTS,
+    CONTRACT_VERSION, DECIMALS, MIN_BURN_AMOUNT,
+    ORACLE_GET_ACBU_RATE, ORACLE_GET_CURRENCIES, ORACLE_GET_BASKET_WEIGHT,
+    ORACLE_GET_RATE, ORACLE_GET_S_TOKEN_ADDR,
     calculate_fee, BurnEvent, ContractError, CurrencyCode, DataKey as SharedDataKey, BASIS_POINTS,
     DECIMALS, MIN_BURN_AMOUNT, UPDATE_INTERVAL_SECONDS,
 };
@@ -145,6 +149,7 @@ impl BurningContract {
         // C-012: Ensure oracle rates are fresh before burning.
         let (acbu_rate, oracle_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
+            &Symbol::new(&env, ORACLE_GET_ACBU_RATE),
             &Symbol::new(&env, "get_acbu_usd_rate_with_timestamp"),
             vec![&env],
         );
@@ -155,6 +160,7 @@ impl BurningContract {
 
         let (rate, rate_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
+            &Symbol::new(&env, ORACLE_GET_RATE),
             &Symbol::new(&env, "get_rate_with_timestamp"),
             vec![&env, currency.clone().into_val(&env)],
         );
@@ -168,7 +174,7 @@ impl BurningContract {
 
         let stoken: Address = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, "get_s_token_address"),
+            &Symbol::new(&env, ORACLE_GET_S_TOKEN_ADDR),
             vec![&env, currency.clone().into_val(&env)],
         );
 
@@ -296,6 +302,7 @@ impl BurningContract {
         // C-012: Ensure oracle rates are fresh before burning.
         let (acbu_rate, oracle_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
+            &Symbol::new(&env, ORACLE_GET_ACBU_RATE),
             &Symbol::new(&env, "get_acbu_usd_rate_with_timestamp"),
             vec![&env],
         );
@@ -345,7 +352,7 @@ impl BurningContract {
 
         let currencies: Vec<CurrencyCode> = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, "get_currencies"),
+            &Symbol::new(&env, ORACLE_GET_CURRENCIES),
             vec![&env],
         );
 
@@ -356,6 +363,15 @@ impl BurningContract {
         let mut amounts_out = Vec::new(&env);
         for i in 0..currencies.len() {
             let currency = currencies.get(i).unwrap();
+            let weight: i128 = env.invoke_contract(
+                &oracle_addr,
+                &Symbol::new(&env, ORACLE_GET_BASKET_WEIGHT),
+                vec![&env, currency.into_val(&env)],
+            );
+            if weight > 0 {
+                last_weighted_idx = Some(i);
+            }
+        }
 
             // C-057: Each currency slot maps to the corresponding recipient by index.
             // If the caller supplied fewer recipients than currencies, reject.
@@ -366,6 +382,8 @@ impl BurningContract {
 
             let weight: i128 = env.invoke_contract(
                 &oracle_addr,
+                &Symbol::new(&env, ORACLE_GET_BASKET_WEIGHT),
+                vec![&env, currency.clone().into_val(&env)],
                 &Symbol::new(&env, "get_basket_weight"),
                 vec![&env, currency.into_val(&env)],
             );
@@ -376,7 +394,7 @@ impl BurningContract {
 
             let rate: i128 = env.invoke_contract(
                 &oracle_addr,
-                &Symbol::new(&env, "get_rate"),
+                &Symbol::new(&env, ORACLE_GET_RATE),
                 vec![&env, currency.clone().into_val(&env)],
             );
             if rate == 0 {
@@ -385,7 +403,7 @@ impl BurningContract {
 
             let stoken: Address = env.invoke_contract(
                 &oracle_addr,
-                &Symbol::new(&env, "get_s_token_address"),
+                &Symbol::new(&env, ORACLE_GET_S_TOKEN_ADDR),
                 vec![&env, currency.clone().into_val(&env)],
             );
 
@@ -565,5 +583,6 @@ impl BurningContract {
 }
 
 fn migrate_v0_to_v1(_env: Env) {
+    // No storage schema changes between v0 and v1.
     // Initial migration logic
 }

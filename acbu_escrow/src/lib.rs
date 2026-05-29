@@ -17,6 +17,8 @@ pub enum EscrowError {
     UninitializedAdmin = 3006,
     UninitializedAcBuToken = 3007,
     AlreadyInitialized = 3008,
+    TimelockNotElapsed = 3009,
+    NoPendingUpgrade = 3010,
 }
 
 #[contracttype]
@@ -25,13 +27,19 @@ pub struct EscrowDataKey {
     pub admin: Symbol,
     pub acbu_token: Symbol,
     pub paused: Symbol,
+    pub pending_upgrade: Symbol,
+    pub pending_upgrade_eligible_at: Symbol,
 }
 
 const DATA_KEY: EscrowDataKey = EscrowDataKey {
     admin: symbol_short!("ADMIN"),
     acbu_token: symbol_short!("ACBU_TKN"),
     paused: symbol_short!("PAUSED"),
+    pending_upgrade: symbol_short!("PEND_UPG"),
+    pending_upgrade_eligible_at: symbol_short!("PU_ETA"),
 };
+
+const UPGRADE_TIMELOCK_SECONDS: u64 = 86_400;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -287,21 +295,50 @@ impl Escrow {
         }
     }
 
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DATA_KEY.admin)
-            .unwrap_or_else(|| env.panic_with_error(EscrowError::UninitializedAdmin));
+    pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), EscrowError> {
+        let admin = Self::get_admin(&env)?;
         admin.require_auth();
-        let paused: bool = env
+        let eligible_at = env.ledger().timestamp() + UPGRADE_TIMELOCK_SECONDS;
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.pending_upgrade, &new_wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.pending_upgrade_eligible_at, &eligible_at);
+        Ok(())
+    }
+
+    pub fn execute_upgrade(env: Env) -> Result<(), EscrowError> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+        let wasm_hash: BytesN<32> = env
             .storage()
             .instance()
-            .get(&DATA_KEY.paused)
-            .unwrap_or(false);
-        if paused {
-            env.panic_with_error(EscrowError::Paused);
+            .get(&DATA_KEY.pending_upgrade)
+            .ok_or(EscrowError::NoPendingUpgrade)?;
+        let eligible_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.pending_upgrade_eligible_at)
+            .unwrap_or(u64::MAX);
+        if env.ledger().timestamp() < eligible_at {
+            return Err(EscrowError::TimelockNotElapsed);
         }
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.storage().instance().remove(&DATA_KEY.pending_upgrade);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_upgrade_eligible_at);
+        env.deployer().update_current_contract_wasm(wasm_hash);
+        Ok(())
+    }
+
+    pub fn cancel_upgrade(env: Env) -> Result<(), EscrowError> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+        env.storage().instance().remove(&DATA_KEY.pending_upgrade);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_upgrade_eligible_at);
+        Ok(())
     }
 }

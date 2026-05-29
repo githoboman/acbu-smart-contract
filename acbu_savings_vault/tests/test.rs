@@ -33,8 +33,6 @@ fn test_withdraw_after_term_has_correct_30day_yield() {
     let deposit_amount = DECIMALS;
     let term_seconds = 30 * 24 * 3600u64; // 2_592_000 seconds
 
-    // Expected: 10M * 1000 bps * 2_592_000 / (10000 * 31_536_000) = 82_191
-    let expected_yield = 82_191i128;
     let expected_fee = 300_000i128;
     let net_deposit = deposit_amount - expected_fee;
     let expected_yield = 79_726i128;
@@ -398,4 +396,60 @@ fn test_update_acbu_token_by_admin_savings_vault() {
 
     let new_token = Address::generate(&env);
     client.update_acbu_token(&new_token);
+}
+
+/// Issue #225 regression: WithdrawEvent.yield_amount must not be zero when a
+/// positive yield_rate is set and time has elapsed past the lock term.
+#[test]
+fn test_withdraw_event_yield_amount_nonzero_issue_225() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let acbu_token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
+    let contract_id = env.register_contract(None, SavingsVault);
+    let client = SavingsVaultClient::new(&env, &contract_id);
+
+    let yield_rate_bps = 1_000i128; // 10% APR
+    client.initialize(&admin, &acbu_token, &0i128, &yield_rate_bps);
+
+    let principal = DECIMALS;
+    let term_seconds = 30 * 24 * 3600u64;
+
+    let elapsed = term_seconds as i128;
+    let expected_yield =
+        principal * yield_rate_bps * elapsed / (10_000 * SECONDS_PER_YEAR as i128);
+
+    let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &acbu_token);
+    token_admin.mint(&user, &principal);
+    token_admin.mint(&contract_id, &expected_yield);
+
+    client.deposit(&user, &principal, &term_seconds);
+    env.ledger()
+        .with_mut(|l| l.timestamp = 1_000_000 + term_seconds);
+
+    client.withdraw(&user, &term_seconds, &principal);
+
+    let events = env.events().all();
+    let withdraw_ev = events
+        .iter()
+        .rev()
+        .find(|e| {
+            e.0 == contract_id
+                && Symbol::from_val(&env, &e.1.get(0).unwrap()) == symbol_short!("Withdraw")
+        })
+        .expect("Withdraw event must be emitted");
+
+    let ev: WithdrawEvent = withdraw_ev.2.into_val(&env);
+    assert!(
+        ev.yield_amount > 0,
+        "WithdrawEvent.yield_amount must be non-zero when yield_rate > 0 (issue #225 regression)"
+    );
+    assert_eq!(ev.yield_amount, expected_yield);
+    assert_eq!(ev.fee_amount, 0);
 }

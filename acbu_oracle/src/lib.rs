@@ -30,6 +30,10 @@ pub enum OracleError {
     CannotRemoveValidator = 7014,
     InvalidVersion = 7015,
     RateStaleLedger = 7016,
+    NoPendingUpgrade = 7017,
+    UpgradeTimelockNotElapsed = 7018,
+    NoPendingValidatorChange = 7019,
+    ValidatorTimelockNotElapsed = 7020,
 }
 
 // ─── Admin rotation timelock (seconds) ───────────────────────────────────────
@@ -56,6 +60,14 @@ pub struct DataKey {
     // ── New keys for two-step admin rotation ──────────────────────────────
     pub pending_admin: Symbol,
     pub pending_admin_eligible_at: Symbol,
+    // ── Timelocked upgrade ────────────────────────────────────────────────
+    pub pending_upgrade_wasm: Symbol,
+    pub pending_upgrade_version: Symbol,
+    pub pending_upgrade_eligible_at: Symbol,
+    // ── Timelocked validator change ───────────────────────────────────────
+    pub pending_validator: Symbol,
+    pub pending_validator_is_add: Symbol,
+    pub pending_validator_eligible_at: Symbol,
 }
 
 const DATA_KEY: DataKey = DataKey {
@@ -71,6 +83,12 @@ const DATA_KEY: DataKey = DataKey {
     version: symbol_short!("VERSION"),
     pending_admin: symbol_short!("PEND_ADM"),
     pending_admin_eligible_at: symbol_short!("PEND_ETA"),
+    pending_upgrade_wasm: symbol_short!("PEND_UPG"),
+    pending_upgrade_version: symbol_short!("PU_VER"),
+    pending_upgrade_eligible_at: symbol_short!("PU_ETA"),
+    pending_validator: symbol_short!("PEND_VAL"),
+    pending_validator_is_add: symbol_short!("PV_ADD"),
+    pending_validator_eligible_at: symbol_short!("PV_ETA"),
 };
 
 const VERSION: u32 = 9; // bumped from 8 → 9 for admin rotation feature
@@ -618,47 +636,101 @@ impl OracleContract {
     // Validator management (unchanged)
     // ─────────────────────────────────────────────────────────────────────────
 
-    pub fn add_validator(env: Env, validator: Address) {
+    /// Schedule a validator add (add=true) or remove (add=false) with a 24-hour timelock.
+    pub fn schedule_validator_change(env: Env, validator: Address, add: bool) {
         Self::check_admin(&env);
-        let validators: Vec<Address> = env.storage().instance().get(&DATA_KEY.validators).unwrap();
-        for v in validators.iter() {
-            if v == validator {
-                env.panic_with_error(OracleError::ValidatorAlreadyExists);
-            }
-        }
-        if validators.len() >= MAX_VALIDATORS {
-            panic!(
-                "Cannot add validator: maximum number of validators ({}) reached",
-                MAX_VALIDATORS
-            );
-        }
-        let mut new_validators = validators.clone();
-        new_validators.push_back(validator);
+        let eligible_at = env.ledger().timestamp() + ADMIN_TIMELOCK_SECONDS;
         env.storage()
             .instance()
-            .set(&DATA_KEY.validators, &new_validators);
+            .set(&DATA_KEY.pending_validator, &validator);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.pending_validator_is_add, &add);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.pending_validator_eligible_at, &eligible_at);
     }
 
-    pub fn remove_validator(env: Env, validator: Address) {
+    pub fn execute_validator_change(env: Env) {
         Self::check_admin(&env);
-        let validators: Vec<Address> = env.storage().instance().get(&DATA_KEY.validators).unwrap();
-        let min_sigs: u32 = env
+        let validator: Address = match env
             .storage()
             .instance()
-            .get(&DATA_KEY.min_signatures)
-            .unwrap();
-        if validators.len() <= min_sigs {
-            env.panic_with_error(OracleError::CannotRemoveValidator);
+            .get(&DATA_KEY.pending_validator)
+        {
+            Some(v) => v,
+            None => env.panic_with_error(OracleError::NoPendingValidatorChange),
+        };
+        let is_add: bool = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.pending_validator_is_add)
+            .unwrap_or(false);
+        let eligible_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.pending_validator_eligible_at)
+            .unwrap_or(u64::MAX);
+        if env.ledger().timestamp() < eligible_at {
+            env.panic_with_error(OracleError::ValidatorTimelockNotElapsed);
         }
-        let mut new_validators = Vec::new(&env);
-        for v in validators.iter() {
-            if v != validator {
-                new_validators.push_back(v.clone());
-            }
-        }
+        env.storage().instance().remove(&DATA_KEY.pending_validator);
         env.storage()
             .instance()
-            .set(&DATA_KEY.validators, &new_validators);
+            .remove(&DATA_KEY.pending_validator_is_add);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_validator_eligible_at);
+
+        let validators: Vec<Address> =
+            env.storage().instance().get(&DATA_KEY.validators).unwrap();
+        if is_add {
+            for v in validators.iter() {
+                if v == validator {
+                    env.panic_with_error(OracleError::ValidatorAlreadyExists);
+                }
+            }
+            if validators.len() >= MAX_VALIDATORS {
+                panic!(
+                    "Cannot add validator: maximum number of validators ({}) reached",
+                    MAX_VALIDATORS
+                );
+            }
+            let mut new_validators = validators.clone();
+            new_validators.push_back(validator);
+            env.storage()
+                .instance()
+                .set(&DATA_KEY.validators, &new_validators);
+        } else {
+            let min_sigs: u32 = env
+                .storage()
+                .instance()
+                .get(&DATA_KEY.min_signatures)
+                .unwrap();
+            if validators.len() <= min_sigs {
+                env.panic_with_error(OracleError::CannotRemoveValidator);
+            }
+            let mut new_validators = Vec::new(&env);
+            for v in validators.iter() {
+                if v != validator {
+                    new_validators.push_back(v.clone());
+                }
+            }
+            env.storage()
+                .instance()
+                .set(&DATA_KEY.validators, &new_validators);
+        }
+    }
+
+    pub fn cancel_validator_change(env: Env) {
+        Self::check_admin(&env);
+        env.storage().instance().remove(&DATA_KEY.pending_validator);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_validator_is_add);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_validator_eligible_at);
     }
 
     pub fn get_validators(env: Env) -> Vec<Address> {
@@ -726,28 +798,80 @@ impl OracleContract {
         }
     }
 
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>, new_version: u32) {
-        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
-        admin.require_auth();
-
+    pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>, new_version: u32) {
+        Self::check_admin(&env);
         let current_version = Self::get_version(env.clone());
         if new_version <= current_version {
             env.panic_with_error(OracleError::InvalidVersion);
         }
+        let eligible_at = env.ledger().timestamp() + ADMIN_TIMELOCK_SECONDS;
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.pending_upgrade_wasm, &new_wasm_hash);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.pending_upgrade_version, &new_version);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.pending_upgrade_eligible_at, &eligible_at);
+    }
 
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
-
-        // Run migrations
+    pub fn execute_upgrade(env: Env) {
+        Self::check_admin(&env);
+        let wasm_hash: BytesN<32> = match env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.pending_upgrade_wasm)
+        {
+            Some(h) => h,
+            None => env.panic_with_error(OracleError::NoPendingUpgrade),
+        };
+        let new_version: u32 = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.pending_upgrade_version)
+            .unwrap_or_else(|| env.panic_with_error(OracleError::NoPendingUpgrade));
+        let eligible_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.pending_upgrade_eligible_at)
+            .unwrap_or(u64::MAX);
+        if env.ledger().timestamp() < eligible_at {
+            env.panic_with_error(OracleError::UpgradeTimelockNotElapsed);
+        }
+        let current_version = Self::get_version(env.clone());
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_upgrade_wasm);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_upgrade_version);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_upgrade_eligible_at);
+        env.deployer().update_current_contract_wasm(wasm_hash);
         for v in current_version..new_version {
             match v {
                 0 => migrate_v0_to_v1(env.clone()),
                 _ => {}
             }
         }
-
         env.storage()
             .instance()
             .set(&SharedDataKey::Version, &new_version);
+    }
+
+    pub fn cancel_upgrade(env: Env) {
+        Self::check_admin(&env);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_upgrade_wasm);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_upgrade_version);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_upgrade_eligible_at);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -8,6 +8,8 @@ use shared::{
     calculate_amount_after_fee, calculate_fee, CurrencyCode, DataKey as SharedDataKey, MintEvent,
     BASIS_POINTS, CONTRACT_VERSION, DECIMALS, MAX_MINT_AMOUNT, MIN_MINT_AMOUNT,
     UPDATE_INTERVAL_SECONDS,
+    ORACLE_GET_ACBU_RATE_WITH_TS, ORACLE_GET_RATE_WITH_TS, ORACLE_GET_CURRENCIES,
+    ORACLE_GET_BASKET_WEIGHT, ORACLE_GET_RATE, ORACLE_GET_S_TOKEN_ADDR, RESERVE_IS_SUFFICIENT,
 };
 
 #[allow(dead_code)]
@@ -197,7 +199,7 @@ impl MintingContract {
         // Get ACBU rate with timestamp and validate oracle freshness
         let (acbu_rate, oracle_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, "get_acbu_usd_rate_with_timestamp"),
+            &Symbol::new(&env, ORACLE_GET_ACBU_RATE_WITH_TS),
             vec![&env],
         );
         check_oracle_freshness(&env, oracle_timestamp, UPDATE_INTERVAL_SECONDS);
@@ -213,7 +215,7 @@ impl MintingContract {
             .expect("Overflow in projected supply calculation");
         let reserve_ok: bool = env.invoke_contract(
             &reserve_tracker_addr,
-            &Symbol::new(&env, "is_reserve_sufficient"),
+            &Symbol::new(&env, RESERVE_IS_SUFFICIENT),
             vec![&env, projected_supply.into_val(&env)],
         );
         if !reserve_ok {
@@ -305,7 +307,7 @@ impl MintingContract {
         // Get ACBU rate with timestamp and validate oracle freshness
         let (acbu_rate, oracle_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, "get_acbu_usd_rate_with_timestamp"),
+            &Symbol::new(&env, ORACLE_GET_ACBU_RATE_WITH_TS),
             vec![&env],
         );
         check_oracle_freshness(&env, oracle_timestamp, UPDATE_INTERVAL_SECONDS);
@@ -320,7 +322,7 @@ impl MintingContract {
 
         let reserve_ok: bool = env.invoke_contract(
             &reserve_tracker_addr,
-            &Symbol::new(&env, "is_reserve_sufficient"),
+            &Symbol::new(&env, RESERVE_IS_SUFFICIENT),
             vec![&env, projected_supply.into_val(&env)],
         );
         if !reserve_ok {
@@ -329,7 +331,7 @@ impl MintingContract {
 
         let currencies: soroban_sdk::Vec<CurrencyCode> = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, "get_currencies"),
+            &Symbol::new(&env, ORACLE_GET_CURRENCIES),
             vec![&env],
         );
 
@@ -341,7 +343,7 @@ impl MintingContract {
         for currency in currencies.iter() {
             let weight: i128 = env.invoke_contract(
                 &oracle_addr,
-                &Symbol::new(&env, "get_basket_weight"),
+                &Symbol::new(&env, ORACLE_GET_BASKET_WEIGHT),
                 vec![&env, currency.clone().into_val(&env)],
             );
             if weight == 0 {
@@ -350,7 +352,7 @@ impl MintingContract {
 
             let rate: i128 = env.invoke_contract(
                 &oracle_addr,
-                &Symbol::new(&env, "get_rate"),
+                &Symbol::new(&env, ORACLE_GET_RATE),
                 vec![&env, currency.clone().into_val(&env)],
             );
             if rate == 0 {
@@ -359,7 +361,7 @@ impl MintingContract {
 
             let stoken: Address = env.invoke_contract(
                 &oracle_addr,
-                &Symbol::new(&env, "get_s_token_address"),
+                &Symbol::new(&env, ORACLE_GET_S_TOKEN_ADDR),
                 vec![&env, currency.clone().into_val(&env)],
             );
 
@@ -457,21 +459,21 @@ impl MintingContract {
 
         let expected_stoken: Address = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, "get_s_token_address"),
+            &Symbol::new(&env, ORACLE_GET_S_TOKEN_ADDR),
             vec![&env, currency.clone().into_val(&env)],
         );
 
         // Get ACBU rate with timestamp and validate oracle freshness
         let (acbu_rate, oracle_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, "get_acbu_usd_rate_with_timestamp"),
+            &Symbol::new(&env, ORACLE_GET_ACBU_RATE_WITH_TS),
             vec![&env],
         );
         check_oracle_freshness(&env, oracle_timestamp, UPDATE_INTERVAL_SECONDS);
 
         let (rate, rate_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, "get_rate_with_timestamp"),
+            &Symbol::new(&env, ORACLE_GET_RATE_WITH_TS),
             vec![&env, currency.clone().into_val(&env)],
         );
         check_oracle_freshness(&env, rate_timestamp, UPDATE_INTERVAL_SECONDS);
@@ -499,7 +501,7 @@ impl MintingContract {
             .expect("Overflow in projected supply calculation");
         let reserve_ok: bool = env.invoke_contract(
             &reserve_tracker_addr,
-            &Symbol::new(&env, "is_reserve_sufficient"),
+            &Symbol::new(&env, RESERVE_IS_SUFFICIENT),
             vec![&env, projected_supply.into_val(&env)],
         );
         if !reserve_ok {
@@ -587,21 +589,21 @@ impl MintingContract {
 
         let expected_stoken: Address = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, "get_s_token_address"),
+            &Symbol::new(&env, ORACLE_GET_S_TOKEN_ADDR),
             vec![&env, currency.clone().into_val(&env)],
         );
 
         // Get ACBU rate with timestamp and validate oracle freshness
         let (acbu_rate, oracle_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, "get_acbu_usd_rate_with_timestamp"),
+            &Symbol::new(&env, ORACLE_GET_ACBU_RATE_WITH_TS),
             vec![&env],
         );
         check_oracle_freshness(&env, oracle_timestamp, UPDATE_INTERVAL_SECONDS);
 
         let (rate, rate_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, "get_rate_with_timestamp"),
+            &Symbol::new(&env, ORACLE_GET_RATE_WITH_TS),
             vec![&env, currency.clone().into_val(&env)],
         );
         check_oracle_freshness(&env, rate_timestamp, UPDATE_INTERVAL_SECONDS);
@@ -625,7 +627,7 @@ impl MintingContract {
             .expect("Overflow in projected supply calculation");
         let reserve_ok: bool = env.invoke_contract(
             &reserve_tracker_addr,
-            &Symbol::new(&env, "is_reserve_sufficient"),
+            &Symbol::new(&env, RESERVE_IS_SUFFICIENT),
             vec![&env, projected_supply.into_val(&env)],
         );
         if !reserve_ok {
@@ -844,7 +846,7 @@ impl MintingContract {
         let oracle_addr: Address = env.storage().instance().get(&DATA_KEY.oracle).unwrap();
         let stoken: Address = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, "get_s_token_address"),
+            &Symbol::new(&env, ORACLE_GET_S_TOKEN_ADDR),
             vec![&env, currency.clone().into_val(&env)],
         );
         let custody = env.current_contract_address();
@@ -854,6 +856,146 @@ impl MintingContract {
             env.panic_with_error(MintingError::InsufficientDemoCustody);
         }
         token.transfer(&custody, &recipient, &amount);
+    }
+
+    /// General fiat mint: User/fintech provides fintech_tx_id; operator/backend signs.
+    /// Validates that the request is not duplicated and that rate/reserve checks pass.
+    /// This replaces the previous hardcoded 1:1 minting path with full oracle + reserve validation.
+    pub fn mint_from_fiat(
+        env: Env,
+        operator: Address,
+        recipient: Address,
+        currency: CurrencyCode,
+        fiat_amount: i128,
+        fintech_tx_id: SorobanString,
+    ) -> i128 {
+        Self::check_paused(&env);
+        let expected_operator: Address = Self::get_operator(env.clone());
+        if operator != expected_operator {
+            panic!("Unauthorized operator");
+        }
+        operator.require_auth();
+        // C-058: reject contract-type recipients — minting to a contract address
+        // that has no token-receipt logic would permanently strand the funds.
+        Self::assert_recipient_is_account(&recipient);
+        // Prevent self-minting: recipient cannot be the minter
+        if recipient == operator {
+            panic!("Recipient cannot be operator");
+        }
+
+        if fintech_tx_id.len() == 0 {
+            panic!("fintech_tx_id cannot be empty");
+        }
+
+        if !check_proof_unused(&env, &fintech_tx_id) {
+            panic!("Fiat transaction already processed");
+        }
+
+        let min_amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.min_mint_amount)
+            .unwrap();
+        let max_amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.max_mint_amount)
+            .unwrap();
+
+        let acbu_token: Address = env.storage().instance().get(&DATA_KEY.acbu_token).unwrap();
+        let oracle_addr: Address = env.storage().instance().get(&DATA_KEY.oracle).unwrap();
+        let reserve_tracker_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.reserve_tracker)
+            .unwrap();
+        let vault: Address = env.storage().instance().get(&DATA_KEY.vault).unwrap();
+        let fee_single: i128 = env.storage().instance().get(&DATA_KEY.fee_single).unwrap();
+        let mut total_supply: i128 = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.total_supply)
+            .unwrap_or(0);
+
+        let expected_stoken: Address = env.invoke_contract(
+            &oracle_addr,
+            &Symbol::new(&env, ORACLE_GET_S_TOKEN_ADDR),
+            vec![&env, currency.clone().into_val(&env)],
+        );
+
+        // Get ACBU rate with timestamp and validate oracle freshness
+        let (acbu_rate, oracle_timestamp): (i128, u64) = env.invoke_contract(
+            &oracle_addr,
+            &Symbol::new(&env, ORACLE_GET_ACBU_RATE_WITH_TS),
+            vec![&env],
+        );
+        check_oracle_freshness(&env, oracle_timestamp, UPDATE_INTERVAL_SECONDS);
+
+        let (rate, rate_timestamp): (i128, u64) = env.invoke_contract(
+            &oracle_addr,
+            &Symbol::new(&env, ORACLE_GET_RATE_WITH_TS),
+            vec![&env, currency.clone().into_val(&env)],
+        );
+        check_oracle_freshness(&env, rate_timestamp, UPDATE_INTERVAL_SECONDS);
+
+        if rate == 0 {
+            panic!("Invalid oracle rate");
+        }
+
+        let usd_gross = fiat_amount
+            .checked_mul(rate)
+            .and_then(|v| v.checked_div(DECIMALS))
+            .expect("Overflow in usd_gross calculation");
+        if usd_gross < min_amount || usd_gross > max_amount {
+            panic!("Invalid mint amount");
+        }
+
+        let usd_after_fee = calculate_amount_after_fee(usd_gross, fee_single);
+        let acbu_amount = usd_after_fee
+            .checked_mul(DECIMALS)
+            .and_then(|v| v.checked_div(acbu_rate))
+            .expect("Overflow in acbu amount calculation");
+
+        let projected_supply = total_supply
+            .checked_add(acbu_amount)
+            .expect("Overflow in projected supply calculation");
+        let reserve_ok: bool = env.invoke_contract(
+            &reserve_tracker_addr,
+            &Symbol::new(&env, RESERVE_IS_SUFFICIENT),
+            vec![&env, projected_supply.into_val(&env)],
+        );
+        if !reserve_ok {
+            panic!("Insufficient reserves: minting would violate the minimum collateral ratio");
+        }
+
+        // Pre-fund custody: the fiat amount is assumed to be held in the contract's balance before this call
+        let custody = env.current_contract_address();
+        let token = soroban_sdk::token::Client::new(&env, &expected_stoken);
+        token.transfer(&custody, &vault, &fiat_amount);
+
+        total_supply += acbu_amount;
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.total_supply, &total_supply);
+
+        let acbu_sac = soroban_sdk::token::StellarAssetClient::new(&env, &acbu_token);
+        acbu_sac.mint(&recipient, &acbu_amount);
+
+        let fee = calculate_fee(usd_gross, fee_single);
+        let mint_event = MintEvent {
+            transaction_id: fintech_tx_id.clone(),
+            user: recipient.clone(),
+            usdc_amount: usd_gross,
+            acbu_amount,
+            fee,
+            rate: acbu_rate,
+            timestamp: env.ledger().timestamp(),
+        };
+        env.events()
+            .publish((symbol_short!("mint"), recipient), mint_event);
+
+        mark_proof_used(&env, &fintech_tx_id);
+        acbu_amount
     }
 
     pub fn get_operator(env: Env) -> Address {
@@ -1031,6 +1173,10 @@ impl MintingContract {
     }
 }
 
+fn migrate_v0_to_v1(_env: Env) {
+    // No storage schema changes between v0 and v1.
+}
+
 // Helper functions for proof tracking and validation
 fn check_oracle_freshness(env: &Env, oracle_timestamp: u64, max_staleness_seconds: u64) {
     let current_time = env.ledger().timestamp();
@@ -1039,6 +1185,23 @@ fn check_oracle_freshness(env: &Env, oracle_timestamp: u64, max_staleness_second
     }
 }
 
+fn generate_unique_tx_id(env: &Env, _user: &Address, amount: i128, _prefix: &str) -> SorobanString {
+    let timestamp = env.ledger().timestamp();
+    let seq = env.ledger().sequence() as u64;
+    // Mix amount, timestamp, and sequence into a 64-bit hash (no alloc / format! needed).
+    let hash = (amount as u64)
+        .wrapping_mul(0x9e3779b97f4a7c15)
+        .wrapping_add(timestamp.wrapping_mul(0x6c62272e07bb0142))
+        .wrapping_add(seq);
+    // Encode as 16 hex chars using only stack memory — no format! or alloc.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut buf = [0u8; 16];
+    let mut h = hash;
+    for i in (0..16).rev() {
+        buf[i] = HEX[(h & 0xF) as usize];
+        h >>= 4;
+    }
+    SorobanString::from_str(env, core::str::from_utf8(&buf).unwrap_or("0000000000000000"))
 fn generate_unique_tx_id(env: &Env, _user: &Address, _amount: i128, prefix: &str) -> SorobanString {
     SorobanString::from_str(env, prefix)
 }
