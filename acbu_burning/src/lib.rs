@@ -5,12 +5,10 @@ use soroban_sdk::{
 };
 
 use shared::{
-    calculate_fee, BurnEvent, CurrencyCode, DataKey as SharedDataKey, reentrancy_guard, BASIS_POINTS,
+    calculate_fee, BurnEvent, ContractError, CurrencyCode, DataKey as SharedDataKey, BASIS_POINTS,
     CONTRACT_VERSION, DECIMALS, MIN_BURN_AMOUNT,
     ORACLE_GET_ACBU_RATE, ORACLE_GET_CURRENCIES, ORACLE_GET_BASKET_WEIGHT,
-    ORACLE_GET_RATE, ORACLE_GET_S_TOKEN_ADDR,
-    calculate_fee, BurnEvent, ContractError, CurrencyCode, DataKey as SharedDataKey, BASIS_POINTS,
-    DECIMALS, MIN_BURN_AMOUNT, UPDATE_INTERVAL_SECONDS,
+    ORACLE_GET_RATE, ORACLE_GET_S_TOKEN_ADDR, UPDATE_INTERVAL_SECONDS,
 };
 
 mod shared {
@@ -153,7 +151,6 @@ impl BurningContract {
         let (acbu_rate, oracle_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
             &Symbol::new(&env, ORACLE_GET_ACBU_RATE),
-            &Symbol::new(&env, "get_acbu_usd_rate_with_timestamp"),
             vec![&env],
         );
         let current_time = env.ledger().timestamp();
@@ -164,7 +161,6 @@ impl BurningContract {
         let (rate, rate_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
             &Symbol::new(&env, ORACLE_GET_RATE),
-            &Symbol::new(&env, "get_rate_with_timestamp"),
             vec![&env, currency.clone().into_val(&env)],
         );
         if current_time > rate_timestamp.saturating_add(UPDATE_INTERVAL_SECONDS) {
@@ -186,15 +182,14 @@ impl BurningContract {
             .checked_sub(fee)
             .expect("Underflow in net acbu calculation");
 
-        // C-019: Simplify math by removing redundant DECIMALS scaling.
-        // stoken_out = (net_acbu * acbu_rate) / rate
+        // C-019: stoken_out = (net_acbu * acbu_rate) / rate
+        // The redundant (net_acbu * DECIMALS) / DECIMALS scaling is removed — it cancels out.
         let stoken_out = net_acbu
             .checked_mul(acbu_rate)
             .and_then(|v| v.checked_div(rate))
             .expect("Overflow in stoken out calculation");
 
         // C-012: Call reserve tracker to verify protocol health before burning.
-        // Even though burning improves the ratio, we ensure the tracker is responsive.
         let current_supply: i128 = env.invoke_contract(
             &acbu_token,
             &Symbol::new(&env, "get_total_supply"),
@@ -206,43 +201,25 @@ impl BurningContract {
             vec![&env, current_supply.into_val(&env)],
         );
         if !reserve_ok {
-            // Optional: protocol might want to allow burning even if under-collateralized.
-            // But here we enforce the check to fulfill the "call" requirement.
             env.panic_with_error(ContractError::InsufficientReserves);
         }
 
-        // C-038: The burn call requires `user` to have authorized this contract
-        // to burn on their behalf.  Soroban propagates the auth tree automatically
-        // when `user.require_auth()` is called above, but we document the
-        // dependency explicitly: the token contract will verify that the invoking
-        // contract (this contract's address) is in the auth tree for `user`.
         let acbu_client = soroban_sdk::token::Client::new(&env, &acbu_token);
         acbu_client.burn(&user, &acbu_amount);
 
-        // C-038: `transfer_from` uses this contract as the spender.  The vault
-        // must have pre-approved this contract address as an allowed spender for
-        // the S-token (via `approve`).  This is an explicit trust assumption:
-        //   vault → approve(burning_contract, stoken, allowance)
-        // If that approval is absent the call will revert with an auth error,
-        // which is the correct safe-fail behaviour.
         let token = soroban_sdk::token::Client::new(&env, &stoken);
         let spender = env.current_contract_address();
-        // C-056: This redemption flow pulls the S-token from the configured
-        // vault using the vault's allowance for this contract.
         token.transfer_from(&spender, &vault, &recipient, &stoken_out);
 
         let tx_id = SorobanString::from_str(&env, "redeem_single");
-        // FIX(#102): Emit gross acbu_amount and explicit net_acbu so indexers can
-        // independently verify: acbu_amount - fee == net_acbu, and reconcile to
-        // within 1 unit without needing to re-derive the fee off-chain.
         let burn_event = BurnEvent {
             transaction_id: tx_id,
             user: user.clone(),
-            acbu_amount, // gross amount burned (unchanged — was already correct)
-            net_acbu,    // explicit post-fee net so indexer needs no arithmetic
+            acbu_amount,
+            net_acbu,
             local_amount: stoken_out,
             currency: currency.clone(),
-            fee, // total fee for this redemption
+            fee,
             rate,
             timestamp: env.ledger().timestamp(),
         };
@@ -279,7 +256,6 @@ impl BurningContract {
         }
 
         // C-057: Enforce all recipient addresses are distinct.
-        // O(n²) is acceptable here — basket sizes are small (≤ ~20 currencies).
         let rlen = recipients.len();
         for i in 0..rlen {
             for j in (i + 1)..rlen {
@@ -312,7 +288,6 @@ impl BurningContract {
         let (acbu_rate, oracle_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
             &Symbol::new(&env, ORACLE_GET_ACBU_RATE),
-            &Symbol::new(&env, "get_acbu_usd_rate_with_timestamp"),
             vec![&env],
         );
         let current_time = env.ledger().timestamp();
@@ -324,13 +299,12 @@ impl BurningContract {
             env.panic_with_error(ContractError::InvalidRate);
         }
 
-        // FIX(#102): Compute totals from gross acbu_amount before any deduction.
         let total_fee = calculate_fee(acbu_amount, fee_rate);
         let net_acbu = acbu_amount
             .checked_sub(total_fee)
             .expect("Underflow in net acbu calculation");
 
-        // C-019: Simplified USD total calculation (net_acbu * acbu_rate) / DECIMALS
+        // usd_total = (net_acbu * acbu_rate) / DECIMALS
         let usd_total = net_acbu
             .checked_mul(acbu_rate)
             .and_then(|v| v.checked_div(DECIMALS))
@@ -351,11 +325,6 @@ impl BurningContract {
             env.panic_with_error(ContractError::InsufficientReserves);
         }
 
-        // C-038: The burn call requires `user` to have authorized this contract
-        // to burn on their behalf.  Soroban propagates the auth tree automatically
-        // when `user.require_auth()` is called above, but we document the
-        // dependency explicitly: the token contract will verify that the invoking
-        // contract (this contract's address) is in the auth tree for `user`.
         let acbu_client = soroban_sdk::token::Client::new(&env, &acbu_token);
         acbu_client.burn(&user, &acbu_amount);
 
@@ -374,7 +343,6 @@ impl BurningContract {
             let currency = currencies.get(i).unwrap();
 
             // C-057: Each currency slot maps to the corresponding recipient by index.
-            // If the caller supplied fewer recipients than currencies, reject.
             if i >= recipients.len() {
                 env.panic_with_error(ContractError::InvalidRecipient);
             }
@@ -405,44 +373,36 @@ impl BurningContract {
                 vec![&env, currency.clone().into_val(&env)],
             );
 
-            // Per-currency gross ACBU slice and fee slice (both derived from gross acbu_amount).
+            // Per-currency gross ACBU slice and fee slice.
             let acbu_gross_i = (weight * acbu_amount) / BASIS_POINTS;
             let fee_i = (weight * total_fee) / BASIS_POINTS;
             let net_acbu_i = acbu_gross_i - fee_i;
 
             let usd_i = (weight * usd_total) / BASIS_POINTS;
-            let native_i = (usd_i * DECIMALS) / rate;
+            // native_i = (usd_i * DECIMALS) / rate — correct because usd_total was already
+            // divided by DECIMALS, so multiplying back restores the fixed-point scaling.
+            let native_i = usd_i
+                .checked_mul(DECIMALS)
+                .and_then(|v| v.checked_div(rate))
+                .expect("Overflow in native_i calculation");
 
             if native_i > 0 {
-                // C-038: `transfer_from` uses this contract as the spender.  The vault
-                // must have pre-approved this contract address as an allowed spender for
-                // each S-token (via `approve`).  This is an explicit trust assumption:
-                //   vault → approve(burning_contract, stoken, allowance)
-                // If that approval is absent the call will revert with an auth error,
-                // which is the correct safe-fail behaviour.
                 let token = soroban_sdk::token::Client::new(&env, &stoken);
                 let spender = env.current_contract_address();
-                // C-056: Basket redemption pulls each S-token leg from the
-                // configured vault via allowance, so the vault must grant this
-                // contract sufficient transfer_from approval.
                 token.transfer_from(&spender, &vault, &recipient, &native_i);
             }
 
             amounts_out.push_back(native_i);
 
             let tx_id = SorobanString::from_str(&env, "redeem_basket");
-            // FIX(#102): Emit gross per-currency acbu slice (acbu_gross_i) not the
-            // already-deducted net_acbu. Also emit net_acbu_i and fee_i so indexers
-            // can verify acbu_gross_i - fee_i == net_acbu_i for each currency leg,
-            // and sum all acbu_gross_i values back to the top-level acbu_amount.
             let burn_event = BurnEvent {
                 transaction_id: tx_id,
                 user: user.clone(),
-                acbu_amount: acbu_gross_i, // per-currency gross slice (was incorrectly net_acbu total)
-                net_acbu: net_acbu_i,      // per-currency net slice
+                acbu_amount: acbu_gross_i,
+                net_acbu: net_acbu_i,
                 local_amount: native_i,
                 currency: currency.clone(),
-                fee: fee_i, // per-currency fee slice
+                fee: fee_i,
                 rate,
                 timestamp: env.ledger().timestamp(),
             };
@@ -569,7 +529,6 @@ impl BurningContract {
 
         env.deployer().update_current_contract_wasm(new_wasm_hash);
 
-        // Run migrations
         for v in current_version..new_version {
             match v {
                 0 => migrate_v0_to_v1(env.clone()),
@@ -585,5 +544,4 @@ impl BurningContract {
 
 fn migrate_v0_to_v1(_env: Env) {
     // No storage schema changes between v0 and v1.
-    // Initial migration logic
 }
