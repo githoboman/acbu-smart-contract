@@ -84,6 +84,9 @@ impl ReserveTrackerContract {
 
     pub fn verify_reserves(env: Env) -> bool {
         let total_acbu_supply = Self::get_total_supply_from_token(&env);
+        if total_acbu_supply == 0 {
+            env.panic_with_error(ReserveTrackerError::ZeroSupply);
+        }
         Self::is_reserve_sufficient(env, total_acbu_supply)
     }
 
@@ -195,6 +198,23 @@ impl ReserveTrackerContract {
         env.storage()
             .instance()
             .set(&SharedDataKey::Version, &new_version);
+    }
+
+    // -----------------------------------------------------------------------
+    // Reserve management (admin only)
+    // -----------------------------------------------------------------------
+
+    /// Replace all stored reserves with an empty map (admin only).
+    ///
+    /// Requires admin authorisation.  Without the auth gate any caller could
+    /// wipe the reserves map, making verify_reserves trivially pass (empty
+    /// reserves → zero total_reserve_usd → ratio check skipped when supply is
+    /// also zero).  This function is intentionally destructive and should only
+    /// be used for emergency recovery or contract reset by the admin.
+    pub fn reset_reserves(env: Env) {
+        Self::check_admin(&env);
+        let empty: Map<CurrencyCode, ReserveData> = Map::new(&env);
+        env.storage().instance().set(&DATA_KEY.reserves, &empty);
     }
 
     // -----------------------------------------------------------------------

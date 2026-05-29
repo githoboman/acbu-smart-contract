@@ -1,9 +1,10 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    Symbol, Vec,
 };
 
-use shared::{calculate_fee, DataKey as SharedDataKey, BASIS_POINTS, CONTRACT_VERSION};
+use shared::{calculate_fee, DataKey as SharedDataKey, reentrancy_guard, BASIS_POINTS, CONTRACT_VERSION};
 
 mod shared {
     pub use shared::*;
@@ -186,6 +187,9 @@ impl SavingsVault {
 
     /// Deposit (lock) ACBU for a term. User transfers ACBU to this contract.
     pub fn deposit(env: Env, user: Address, amount: i128, term_seconds: u64) -> i128 {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         user.require_auth();
 
         if Self::is_paused(&env) {
@@ -225,6 +229,7 @@ impl SavingsVault {
             .unwrap_or(Vec::new(&env));
 
         lots.push_back(DepositLot {
+            // Store net_amount instead of gross amount.
             amount: net_amount,
             timestamp: env.ledger().timestamp(),
             term_seconds,
@@ -250,11 +255,17 @@ impl SavingsVault {
             },
         );
 
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
+
         net_amount
     }
 
     /// Withdraw unlocked ACBU + yield for a specific term.
     pub fn withdraw(env: Env, user: Address, term_seconds: u64, amount: i128) -> i128 {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         user.require_auth();
 
         if Self::is_paused(&env) {
@@ -272,6 +283,8 @@ impl SavingsVault {
             .unwrap_or_else(|| env.panic_with_error(Error::NoDeposit));
 
         let now = env.ledger().timestamp();
+
+        // Compute total unlocked balance.
         let mut unlocked_balance = 0i128;
         for lot in lots.iter() {
             if now >= lot.timestamp.saturating_add(lot.term_seconds) {
@@ -285,7 +298,7 @@ impl SavingsVault {
             env.panic_with_error(Error::InsufficientUnlocked);
         }
 
-        // Removed load_fee_rate and calculate_fee. Fee no longer charged on withdraw.
+        // Fee is not charged on withdraw — only yield is added.
         let yield_rate = Self::load_yield_rate(&env).unwrap_or_else(|e| env.panic_with_error(e));
 
         let mut amount_left = amount;
@@ -301,7 +314,7 @@ impl SavingsVault {
             if lot.amount <= amount_left {
                 amount_left = amount_left
                     .checked_sub(lot.amount)
-                    .unwrap_or_else(|| env.panic_with_error(Error::Overflow));
+                    .unwrap_or_else(|| env.panic_with_error(Error::AccountingError));
                 let elapsed = now.saturating_sub(lot.timestamp);
                 let lot_yield = Self::calculate_yield(lot.amount, yield_rate, elapsed)
                     .unwrap_or_else(|e| env.panic_with_error(e));
@@ -313,7 +326,7 @@ impl SavingsVault {
                 let remaining = lot
                     .amount
                     .checked_sub(consumed)
-                    .unwrap_or_else(|| env.panic_with_error(Error::Overflow));
+                    .unwrap_or_else(|| env.panic_with_error(Error::AccountingError));
                 let elapsed = now.saturating_sub(lot.timestamp);
                 let lot_yield = Self::calculate_yield(consumed, yield_rate, elapsed)
                     .unwrap_or_else(|e| env.panic_with_error(e));
@@ -350,7 +363,7 @@ impl SavingsVault {
 
         // 1. Return the principal from this contract to user.
         token.transfer(&vault_addr, &user, &amount);
-        // 2. Mint the yield (assumes this contract is a minter on ACBU token or has balance).
+        // 2. Transfer the yield (assumes contract holds sufficient ACBU balance).
         if yield_amount > 0 {
             token.transfer(&vault_addr, &user, &yield_amount);
         }
@@ -360,11 +373,14 @@ impl SavingsVault {
             WithdrawEvent {
                 user,
                 amount,
-                fee_amount: 0,
+                fee_amount: 0, // No fee on withdraw
                 yield_amount,
                 timestamp: now,
             },
         );
+
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
 
         payout_amount
     }
@@ -392,6 +408,10 @@ impl SavingsVault {
         let mut yield_amount = 0i128;
 
         for lot in lots.iter() {
+            let unlocked = now >= lot.timestamp.saturating_add(lot.term_seconds);
+            if !unlocked {
+                continue;
+            }
             let elapsed = now.saturating_sub(lot.timestamp);
             let lot_yield = Self::calculate_yield(lot.amount, yield_rate, elapsed)
                 .unwrap_or_else(|e| env.panic_with_error(e));
@@ -413,6 +433,13 @@ impl SavingsVault {
         let admin = Self::load_admin(&env).unwrap_or_else(|e| env.panic_with_error(e));
         admin.require_auth();
         env.storage().instance().set(&DATA_KEY.paused, &false);
+    }
+
+    pub fn get_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&SharedDataKey::Version)
+            .unwrap_or(0)
     }
 
     pub fn update_acbu_token(env: Env, new_acbu_token: Address) {
