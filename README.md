@@ -18,7 +18,7 @@ Soroban (Stellar) smart contracts for the ACBU (African Currency Basket Unit) st
 ## Building
 
 ```bash
-# Build all contracts
+# Build all contracts in the workspace
 cargo build --target wasm32-unknown-unknown --release
 
 # Build specific contract
@@ -29,7 +29,7 @@ cargo build --target wasm32-unknown-unknown --release
 ## Testing
 
 ```bash
-# Run all tests
+# Run all tests in the workspace
 cargo test
 
 # Run tests for specific contract
