@@ -2,6 +2,8 @@
 
 use soroban_sdk::{contracterror, contracttype, Address, String as SorobanString, Vec};
 
+pub mod reentrancy_guard;
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {

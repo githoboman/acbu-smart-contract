@@ -5,7 +5,7 @@ use soroban_sdk::{
 };
 
 use shared::{
-    calculate_fee, BurnEvent, CurrencyCode, DataKey as SharedDataKey, BASIS_POINTS,
+    calculate_fee, BurnEvent, CurrencyCode, DataKey as SharedDataKey, reentrancy_guard, BASIS_POINTS,
     CONTRACT_VERSION, DECIMALS, MIN_BURN_AMOUNT,
     ORACLE_GET_ACBU_RATE, ORACLE_GET_CURRENCIES, ORACLE_GET_BASKET_WEIGHT,
     ORACLE_GET_RATE, ORACLE_GET_S_TOKEN_ADDR,
@@ -114,6 +114,9 @@ impl BurningContract {
         acbu_amount: i128,
         currency: CurrencyCode,
     ) -> i128 {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         Self::check_paused(&env);
         user.require_auth();
 
@@ -240,6 +243,9 @@ impl BurningContract {
         env.events()
             .publish((symbol_short!("burn"), user), burn_event);
 
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
+
         stoken_out
     }
 
@@ -255,6 +261,9 @@ impl BurningContract {
         recipients: Vec<Address>,
         acbu_amount: i128,
     ) -> Vec<i128> {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         Self::check_paused(&env);
         user.require_auth();
 
@@ -445,6 +454,9 @@ impl BurningContract {
             env.events()
                 .publish((symbol_short!("burn"), user.clone()), burn_event);
         }
+
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
 
         amounts_out
     }
