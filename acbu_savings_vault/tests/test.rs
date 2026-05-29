@@ -33,8 +33,6 @@ fn test_withdraw_after_term_has_correct_30day_yield() {
     let deposit_amount = DECIMALS;
     let term_seconds = 30 * 24 * 3600u64; // 2_592_000 seconds
 
-    // Expected: 10M * 1000 bps * 2_592_000 / (10000 * 31_536_000) = 82_191
-    let expected_yield = 82_191i128;
     let expected_fee = 300_000i128;
     let net_deposit = deposit_amount - expected_fee;
     let expected_yield = 79_726i128;

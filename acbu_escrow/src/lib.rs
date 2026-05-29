@@ -3,7 +3,7 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Symbol,
 };
 
-use shared::{DataKey as SharedDataKey, CONTRACT_VERSION};
+use shared::{DataKey as SharedDataKey, CONTRACT_VERSION, reentrancy_guard};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -116,6 +116,9 @@ impl Escrow {
         amount: i128,
         escrow_id: u64,
     ) -> Result<(), EscrowError> {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         let paused: bool = env
             .storage()
             .instance()
@@ -156,12 +159,18 @@ impl Escrow {
             },
         );
 
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
+
         Ok(())
     }
 
     /// Release escrow: payee receives ACBU (payer authorization required)
     /// caller must supply payer and escrow_id to identify which escrow to release
     pub fn release(env: Env, escrow_id: u64, payer: Address) -> Result<(), EscrowError> {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         let paused: bool = env
             .storage()
             .instance()
@@ -202,12 +211,18 @@ impl Escrow {
             },
         );
 
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
+
         Ok(())
     }
 
     /// Refund escrow: payer gets ACBU back (admin or dispute resolution)
     /// key is same as release since it identifies which escrow to refund
     pub fn refund(env: Env, escrow_id: u64, payer: Address) -> Result<(), EscrowError> {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
 
@@ -240,6 +255,9 @@ impl Escrow {
                 timestamp: env.ledger().timestamp(),
             },
         );
+
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
 
         Ok(())
     }

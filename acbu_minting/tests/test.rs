@@ -3,9 +3,9 @@
 use acbu_minting::{MintingContract, MintingContractClient};
 use shared::{CurrencyCode, MintEvent, DECIMALS};
 use soroban_sdk::{
-    contract, contractimpl, symbol_short,
+    bytesn, contract, contractimpl, symbol_short,
     testutils::{Address as _, Events},
-    Address, Env, FromVal, IntoVal, Symbol, Vec,
+    Address, BytesN, Env, FromVal, IntoVal, String as SorobanString, Symbol, Vec,
 };
 
 // --- Mocks ---
@@ -23,6 +23,8 @@ mod oracle_mock {
             DECIMALS
         }
 
+        pub fn get_acbu_usd_rate_with_timestamp(_env: Env) -> (i128, u64) {
+            (DECIMALS, 0)
         pub fn get_acbu_usd_rate_with_timestamp(env: Env) -> (i128, u64) {
             (DECIMALS, env.ledger().timestamp())
         }
@@ -41,6 +43,8 @@ mod oracle_mock {
             DECIMALS
         }
 
+        pub fn get_rate_with_timestamp(_env: Env, _c: CurrencyCode) -> (i128, u64) {
+            (DECIMALS, 0)
         pub fn get_rate_with_timestamp(env: Env, _c: CurrencyCode) -> (i128, u64) {
             (DECIMALS, env.ledger().timestamp())
         }
@@ -307,6 +311,8 @@ fn test_mint_from_basket() {
     );
 
     let acbu_amt = 100 * DECIMALS;
+    let proof = SorobanString::from_str(&env, "basket_proof_001");
+    let net = client.mint_from_basket(&user, &user, &acbu_amt, &proof);
     let proof_id = soroban_sdk::String::from_str(&env, "proof_1");
     let net = client.mint_from_basket(&user, &user, &acbu_amt, &proof_id);
     assert!(net > 0);
@@ -387,12 +393,14 @@ fn test_mint_from_demo_fiat() {
 
     let fiat_amount = 50 * DECIMALS;
     let acbu_client = soroban_sdk::token::Client::new(&env, &acbu_token_id);
+    let proof = SorobanString::from_str(&env, "demo_proof_001");
     let tx_id = soroban_sdk::String::from_str(&env, "tx_1");
     let acbu = client.mint_from_demo_fiat(
         &admin,
         &recipient,
         &CurrencyCode::new(&env, "NGN"),
         &fiat_amount,
+        &proof,
         &tx_id,
     );
     assert!(acbu > 0);
@@ -438,6 +446,7 @@ fn test_mint_from_demo_fiat_wrong_operator() {
         &recipient,
         &CurrencyCode::new(&env, "NGN"),
         &(10 * DECIMALS),
+        &proof,
         &tx_id,
     );
 }
@@ -476,12 +485,14 @@ fn test_set_operator_and_mint_demo_fiat() {
     client.set_operator(&operator);
     assert_eq!(client.get_operator(), operator);
 
+    let proof = SorobanString::from_str(&env, "demo_proof_operator");
     let tx_id = soroban_sdk::String::from_str(&env, "tx_ok");
     let acbu = client.mint_from_demo_fiat(
         &operator,
         &recipient,
         &CurrencyCode::new(&env, "NGN"),
         &(20 * DECIMALS),
+        &proof,
         &tx_id,
     );
     assert!(acbu > 0);
@@ -554,12 +565,67 @@ fn test_mint_from_demo_fiat_exceeds_max() {
 
     let huge_fiat_amount = 2_000_000_000_000;
     // huge_fiat_amount converted to USD gross will exceed max (given 1:1 rate in MockOracle)
+    let proof = SorobanString::from_str(&env, "demo_proof_huge");
     let tx_id = soroban_sdk::String::from_str(&env, "tx_huge");
     client.mint_from_demo_fiat(
         &operator,
         &recipient,
         &CurrencyCode::new(&env, "NGN"),
         &huge_fiat_amount,
+        &proof,
+    );
+}
+
+// --- Upgrade path tests (issue #242) ---
+
+#[test]
+fn test_version_set_on_initialize() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, oracle, reserve_tracker, acbu_token, usdc_token, client) = setup_test(&env);
+    init_mint_client(&env, &client, &admin, &oracle, &reserve_tracker,
+        &acbu_token, &usdc_token, &admin, &admin, 300, 100);
+    assert_eq!(client.get_version(), 1);
+}
+
+#[test]
+#[should_panic(expected = "Invalid version upgrade")]
+fn test_upgrade_rejects_same_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, oracle, reserve_tracker, acbu_token, usdc_token, client) = setup_test(&env);
+    init_mint_client(&env, &client, &admin, &oracle, &reserve_tracker,
+        &acbu_token, &usdc_token, &admin, &admin, 300, 100);
+    // version is 1; upgrading to 1 must be rejected before any WASM lookup
+    let dummy_hash: BytesN<32> = bytesn!(&env, 0x0000000000000000000000000000000000000000000000000000000000000000);
+    client.upgrade(&dummy_hash, &1u32);
+}
+
+#[test]
+#[should_panic(expected = "Invalid version upgrade")]
+fn test_upgrade_rejects_lower_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, oracle, reserve_tracker, acbu_token, usdc_token, client) = setup_test(&env);
+    init_mint_client(&env, &client, &admin, &oracle, &reserve_tracker,
+        &acbu_token, &usdc_token, &admin, &admin, 300, 100);
+    let dummy_hash: BytesN<32> = bytesn!(&env, 0x0000000000000000000000000000000000000000000000000000000000000000);
+    client.upgrade(&dummy_hash, &0u32);
+}
+
+#[test]
+fn test_storage_state_intact_across_upgrade_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, oracle, reserve_tracker, acbu_token, usdc_token, client) = setup_test(&env);
+    init_mint_client(&env, &client, &admin, &oracle, &reserve_tracker,
+        &acbu_token, &usdc_token, &admin, &admin, 300, 100);
+    // All configured values must be intact regardless of whether an upgrade is attempted.
+    assert_eq!(client.get_version(), 1);
+    assert_eq!(client.get_fee_rate(), 300);
+    assert_eq!(client.get_fee_single(), 100);
+    assert_eq!(client.get_total_supply(), 0);
+    assert!(!client.is_paused());
         &tx_id,
     );
 }
