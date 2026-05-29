@@ -13,6 +13,11 @@ use shared::{
     DECIMALS, MIN_BURN_AMOUNT, UPDATE_INTERVAL_SECONDS,
 };
 
+mod shared {
+    pub use shared::*;
+}
+
+/*
 #[allow(dead_code)]
 pub mod token_contract {
     soroban_sdk::contractimport!(
@@ -20,6 +25,7 @@ pub mod token_contract {
         sha256 = "d97a3e83c3523504e4ae1dc74b89fcaee443f77ac6c88744d0b28f963571aac5"
     );
 }
+*/
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
