@@ -68,8 +68,6 @@ After deployment, contract addresses are saved to `.soroban/deployment_{network}
 
 ```
 .
-├── Cargo.toml              # Workspace configuration
-├── shared/                 # Shared types and utilities
 ├── acbu_minting/           # Minting contract
 ├── acbu_burning/           # Burning contract
 ├── acbu_oracle/            # Oracle contract
@@ -77,8 +75,11 @@ After deployment, contract addresses are saved to `.soroban/deployment_{network}
 ├── acbu_savings_vault/     # Savings vault contract
 ├── acbu_lending_pool/      # Lending pool contract
 ├── acbu_escrow/            # Escrow contract
-├── acbu_multisig/          # Multisig support contract
-└── scripts/                # Deployment scripts
+├── acbu_multisig/          # Multisig shared contract
+├── shared/                 # Shared types and utilities
+├── scripts/                # Deployment scripts
+├── docs/                   # Documentation
+└── tests/                  # Integration tests
 ```
 
 ### Adding a New Contract
