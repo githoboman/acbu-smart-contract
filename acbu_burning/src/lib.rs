@@ -5,7 +5,7 @@ use soroban_sdk::{
 };
 
 use shared::{
-    calculate_fee, BurnEvent, CurrencyCode, DataKey as SharedDataKey, BASIS_POINTS,
+    calculate_fee, BurnEvent, CurrencyCode, DataKey as SharedDataKey, reentrancy_guard, BASIS_POINTS,
     CONTRACT_VERSION, DECIMALS, MIN_BURN_AMOUNT,
     ORACLE_GET_ACBU_RATE, ORACLE_GET_CURRENCIES, ORACLE_GET_BASKET_WEIGHT,
     ORACLE_GET_RATE, ORACLE_GET_S_TOKEN_ADDR,
@@ -13,13 +13,19 @@ use shared::{
     DECIMALS, MIN_BURN_AMOUNT, UPDATE_INTERVAL_SECONDS,
 };
 
+mod shared {
+    pub use shared::*;
+}
+
+/*
 #[allow(dead_code)]
 pub mod token_contract {
     soroban_sdk::contractimport!(
         file = "../soroban_token_contract.wasm",
-        sha256 = "d97a3e83c3523504e4ae1dc74b89fcaee443f77ac6c88744d0b28f963571aac5"
+        sha256 = "eb1a53948744e12a6b00ec891b301ebc78a06deb984d3726c9cbc315392aedec"
     );
 }
+*/
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -99,7 +105,7 @@ impl BurningContract {
         env.storage()
             .instance()
             .set(&DATA_KEY.fee_single_redeem, &fee_single_redeem_bps);
-        env.storage().instance().set(&SharedDataKey::Version, &2u32);
+        env.storage().instance().set(&SharedDataKey::Version, &CONTRACT_VERSION);
         env.storage().instance().set(&DATA_KEY.paused, &false);
         env.storage()
             .instance()
@@ -114,6 +120,9 @@ impl BurningContract {
         acbu_amount: i128,
         currency: CurrencyCode,
     ) -> i128 {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         Self::check_paused(&env);
         user.require_auth();
 
@@ -240,6 +249,9 @@ impl BurningContract {
         env.events()
             .publish((symbol_short!("burn"), user), burn_event);
 
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
+
         stoken_out
     }
 
@@ -255,6 +267,9 @@ impl BurningContract {
         recipients: Vec<Address>,
         acbu_amount: i128,
     ) -> Vec<i128> {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         Self::check_paused(&env);
         user.require_auth();
 
@@ -357,15 +372,6 @@ impl BurningContract {
         let mut amounts_out = Vec::new(&env);
         for i in 0..currencies.len() {
             let currency = currencies.get(i).unwrap();
-            let weight: i128 = env.invoke_contract(
-                &oracle_addr,
-                &Symbol::new(&env, ORACLE_GET_BASKET_WEIGHT),
-                vec![&env, currency.into_val(&env)],
-            );
-            if weight > 0 {
-                last_weighted_idx = Some(i);
-            }
-        }
 
             // C-057: Each currency slot maps to the corresponding recipient by index.
             // If the caller supplied fewer recipients than currencies, reject.
@@ -378,8 +384,6 @@ impl BurningContract {
                 &oracle_addr,
                 &Symbol::new(&env, ORACLE_GET_BASKET_WEIGHT),
                 vec![&env, currency.clone().into_val(&env)],
-                &Symbol::new(&env, "get_basket_weight"),
-                vec![&env, currency.into_val(&env)],
             );
             if weight == 0 {
                 amounts_out.push_back(0);
@@ -445,6 +449,9 @@ impl BurningContract {
             env.events()
                 .publish((symbol_short!("burn"), user.clone()), burn_event);
         }
+
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
 
         amounts_out
     }
