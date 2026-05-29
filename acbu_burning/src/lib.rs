@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, vec, Address, BytesN, Env,
-    IntoVal, String as SorobanString, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, vec, Address, BytesN, Env, IntoVal,
+    String as SorobanString, Symbol, Vec,
 };
 
 use shared::{
@@ -11,13 +11,19 @@ use shared::{
     ORACLE_GET_RATE, ORACLE_GET_S_TOKEN_ADDR, UPDATE_INTERVAL_SECONDS,
 };
 
+mod shared {
+    pub use shared::*;
+}
+
+/*
 #[allow(dead_code)]
 pub mod token_contract {
     soroban_sdk::contractimport!(
         file = "../soroban_token_contract.wasm",
-        sha256 = "d97a3e83c3523504e4ae1dc74b89fcaee443f77ac6c88744d0b28f963571aac5"
+        sha256 = "eb1a53948744e12a6b00ec891b301ebc78a06deb984d3726c9cbc315392aedec"
     );
 }
+*/
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -97,7 +103,7 @@ impl BurningContract {
         env.storage()
             .instance()
             .set(&DATA_KEY.fee_single_redeem, &fee_single_redeem_bps);
-        env.storage().instance().set(&SharedDataKey::Version, &2u32);
+        env.storage().instance().set(&SharedDataKey::Version, &CONTRACT_VERSION);
         env.storage().instance().set(&DATA_KEY.paused, &false);
         env.storage()
             .instance()
@@ -112,6 +118,9 @@ impl BurningContract {
         acbu_amount: i128,
         currency: CurrencyCode,
     ) -> i128 {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         Self::check_paused(&env);
         user.require_auth();
 
@@ -217,6 +226,9 @@ impl BurningContract {
         env.events()
             .publish((symbol_short!("burn"), user), burn_event);
 
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
+
         stoken_out
     }
 
@@ -232,6 +244,9 @@ impl BurningContract {
         recipients: Vec<Address>,
         acbu_amount: i128,
     ) -> Vec<i128> {
+        // Re-entrancy guard
+        reentrancy_guard::acquire_guard(&env);
+
         Self::check_paused(&env);
         user.require_auth();
 
@@ -394,6 +409,9 @@ impl BurningContract {
             env.events()
                 .publish((symbol_short!("burn"), user.clone()), burn_event);
         }
+
+        // Release re-entrancy guard
+        reentrancy_guard::release_guard(&env);
 
         amounts_out
     }
