@@ -36,7 +36,7 @@ Issues found in the smart contracts (acbu_minting, acbu_burning, acbu_oracle, ac
 
 ## Low
 
-22. **Magic number for fee cap in savings and lending** – acbu_savings_vault and acbu_lending_pool use `10_000` instead of `shared::BASIS_POINTS`, unlike minting and burning.
+22. **Magic number for fee cap in savings and lending** – ✅ **Resolved (PR #143):** acbu_savings_vault and acbu_lending_pool now use `shared::BASIS_POINTS` constant instead of hardcoded `10_000`, consistent with minting and burning.
 23. **Incorrect fee in per-account BurnEvent** – acbu_burning/src/lib.rs: Each `BurnEvent` uses `calculate_fee(amount_per_account, fee_rate)`, but the fee is taken from the total `acbu_amount`. Per-account fees in events don't match actual fee accounting.
 24. **`yield_amount` always 0 in savings** – acbu_savings_vault/src/lib.rs: `WithdrawEvent` always sets `yield_amount: 0`, suggesting yield logic is not implemented.
 25. **Fee rate stored but unused in lending pool** – acbu_lending_pool/src/lib.rs: `fee_rate` is stored during initialization but never applied to any operation.
