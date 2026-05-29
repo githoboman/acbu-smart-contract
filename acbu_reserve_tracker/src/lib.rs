@@ -16,11 +16,7 @@ mod shared {
 pub enum ReserveTrackerError {
     AlreadyInitialized = 8001,
     InvalidVersion = 8002,
-    /// Returned when verify_reserves is called but the ACBU token reports zero
-    /// total supply.  A zero-supply contract has no outstanding obligations and
-    /// would trivially pass the reserve ratio check — callers should not rely on
-    /// verify_reserves as a solvency signal before any tokens are minted.
-    ZeroSupply = 8003,
+    Unknown = 8999,
 }
 
 #[contracttype]

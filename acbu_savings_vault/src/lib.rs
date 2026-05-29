@@ -35,6 +35,7 @@ pub enum Error {
     InvalidVersion = 1016,
     TimelockNotElapsed = 1017,
     NoPendingUpgrade = 1018,
+    Unknown = 1999,
 }
 
 // ---------------------------------------------------------------------------

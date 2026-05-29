@@ -106,6 +106,7 @@ pub enum Error {
     InvalidVersion = 2002,
     TimelockNotElapsed = 2003,
     NoPendingUpgrade = 2004,
+    Unknown = 2999,
 }
 
 #[contract]

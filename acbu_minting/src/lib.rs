@@ -94,7 +94,7 @@ pub enum MintingError {
     FintechTxIdTooLong = 5016,
     FintechTxIdInvalidChar = 5017,
     InvalidVersion = 5018,
-    MaxSupplyExceeded = 5019,
+    Unknown = 5999,
 }
 
 #[contract]
