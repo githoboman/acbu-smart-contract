@@ -6,6 +6,9 @@ use soroban_sdk::{
 
 use shared::{CurrencyCode, DataKey as SharedDataKey, ReserveData, BASIS_POINTS, CONTRACT_VERSION};
 
+// Single shared-crate re-export. Previously the file contained duplicate
+// `token_contract` module imports and orphaned `initialize` body fragments
+// that were dead code and could shadow real logic on upgrade (issue #197).
 mod shared {
     pub use shared::*;
 }
