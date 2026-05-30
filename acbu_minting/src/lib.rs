@@ -2,6 +2,13 @@
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, vec, Address, BytesN, Env,
     IntoVal, String as SorobanString, Symbol,
+use soroban_sdk::{Address, Env, String};
+fn generate_unique_tx_id(env: &Env, _user: &Address, _amount: i128, prefix: &str) -> String {     String::from_str(env, prefix) }
+#![no_std]
+use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, vec, Address, Bytes, BytesN,
+    Env, IntoVal, String as SorobanString, Symbol,
 };
 
 use shared::{
@@ -10,6 +17,10 @@ use shared::{
     UPDATE_INTERVAL_SECONDS,
     ORACLE_GET_ACBU_RATE_WITH_TS, ORACLE_GET_RATE_WITH_TS, ORACLE_GET_CURRENCIES,
     ORACLE_GET_BASKET_WEIGHT, ORACLE_GET_RATE, ORACLE_GET_S_TOKEN_ADDR, RESERVE_IS_SUFFICIENT,
+    BASIS_POINTS, CONTRACT_VERSION, DECIMALS, MAX_MINT_AMOUNT, MIN_MINT_AMOUNT,
+    ORACLE_GET_ACBU_RATE_WITH_TS, ORACLE_GET_BASKET_WEIGHT, ORACLE_GET_CURRENCIES, ORACLE_GET_RATE,
+    ORACLE_GET_RATE_WITH_TS, ORACLE_GET_S_TOKEN_ADDR, RESERVE_IS_SUFFICIENT,
+    UPDATE_INTERVAL_SECONDS,
 };
 
 #[allow(dead_code)]
@@ -69,6 +80,7 @@ const DATA_KEY: DataKey = DataKey {
     processed_fintech_tx_ids: symbol_short!("FTX_IDS"),
     max_supply: symbol_short!("MAX_SUP"),
 };
+const TX_NONCE_KEY: Symbol = symbol_short!("TX_NONCE");
 
 // CONTRACT_VERSION is imported from shared
 
@@ -683,6 +695,9 @@ impl MintingContract {
         let fee = calculate_fee(usd_gross, fee_single);
         let mint_event = MintEvent {
             transaction_id: SorobanString::from_str(&env, "mint_demo_fiat"),
+        let tx_id = generate_unique_tx_id(&env, &recipient, acbu_amount, "mint_demo");
+        let mint_event = MintEvent {
+            transaction_id: tx_id,
             user: recipient.clone(),
             usdc_amount: usd_gross,
             acbu_amount,
@@ -759,6 +774,7 @@ impl MintingContract {
             .get(&DATA_KEY.reserve_tracker)
             .unwrap();
         let _vault: Address = env.storage().instance().get(&DATA_KEY.vault).unwrap();
+        let vault: Address = env.storage().instance().get(&DATA_KEY.vault).unwrap();
         let fee_rate: i128 = env.storage().instance().get(&DATA_KEY.fee_rate).unwrap();
         let treasury: Address = env.storage().instance().get(&DATA_KEY.treasury).unwrap();
         let mut total_supply: i128 = env
@@ -773,6 +789,7 @@ impl MintingContract {
         let (acbu_rate, acbu_oracle_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
             &Symbol::new(&env, "get_acbu_usd_rate_with_timestamp"),
+            &Symbol::new(&env, ORACLE_GET_ACBU_RATE_WITH_TS),
             vec![&env],
         );
         check_oracle_freshness(&env, acbu_oracle_timestamp, UPDATE_INTERVAL_SECONDS);
@@ -780,6 +797,7 @@ impl MintingContract {
         let (rate, rate_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
             &Symbol::new(&env, "get_rate_with_timestamp"),
+            &Symbol::new(&env, ORACLE_GET_RATE_WITH_TS),
             vec![&env, currency.clone().into_val(&env)],
         );
         check_oracle_freshness(&env, rate_timestamp, UPDATE_INTERVAL_SECONDS);
@@ -809,6 +827,9 @@ impl MintingContract {
         let reserve_ok: bool = env.invoke_contract(
             &reserve_tracker_addr,
             &Symbol::new(&env, "is_reserve_sufficient"),
+        let reserve_ok: bool = env.invoke_contract(
+            &reserve_tracker_addr,
+            &Symbol::new(&env, RESERVE_IS_SUFFICIENT),
             vec![&env, projected_supply.into_val(&env)],
         );
         if !reserve_ok {
@@ -1279,6 +1300,53 @@ fn generate_unique_tx_id(env: &Env, _user: &Address, amount: i128, _prefix: &str
     SorobanString::from_str(env, core::str::from_utf8(&buf).unwrap_or("0000000000000000"))
 fn generate_unique_tx_id(env: &Env, _user: &Address, _amount: i128, prefix: &str) -> SorobanString {
     SorobanString::from_str(env, prefix)
+fn generate_unique_tx_id(env: &Env, user: &Address, amount: i128, prefix: &str) -> SorobanString {
+    let nonce = next_tx_nonce(env);
+    let mut preimage = Bytes::new(env);
+
+    preimage.append(&SorobanString::from_str(env, prefix).to_xdr(env));
+    preimage.append(&env.current_contract_address().to_xdr(env));
+    preimage.append(&user.to_xdr(env));
+    preimage.append(&amount.to_xdr(env));
+    preimage.append(&env.ledger().timestamp().to_xdr(env));
+    preimage.append(&env.ledger().sequence().to_xdr(env));
+    preimage.append(&nonce.to_xdr(env));
+
+    let digest = env.crypto().sha256(&preimage).to_array();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let prefix_bytes = prefix.as_bytes();
+    let mut buf = [0u8; 80];
+    let mut offset = 0usize;
+
+    for &b in prefix_bytes.iter() {
+        buf[offset] = b;
+        offset += 1;
+    }
+    buf[offset] = b'_';
+    offset += 1;
+
+    for byte in digest.iter() {
+        buf[offset] = HEX[(byte >> 4) as usize];
+        buf[offset + 1] = HEX[(byte & 0x0f) as usize];
+        offset += 2;
+    }
+
+    SorobanString::from_str(
+        env,
+        core::str::from_utf8(&buf[..offset]).unwrap_or("mint_invalid_tx_id"),
+    )
+}
+
+fn next_tx_nonce(env: &Env) -> u64 {
+    let nonce = env
+        .storage()
+        .instance()
+        .get(&TX_NONCE_KEY)
+        .unwrap_or(0u64)
+        .checked_add(1)
+        .expect("transaction nonce overflow");
+    env.storage().instance().set(&TX_NONCE_KEY, &nonce);
+    nonce
 }
 
 // ---------------------------------------------------------------------------

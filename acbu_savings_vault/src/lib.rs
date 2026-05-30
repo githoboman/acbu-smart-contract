@@ -10,6 +10,18 @@ mod shared {
     pub use shared::*;
 }
 
+// --- Definitions (These were missing, now included here) ---
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    Symbol, Vec,
+};
+
+use shared::{calculate_fee, DataKey as SharedDataKey, reentrancy_guard, BASIS_POINTS, CONTRACT_VERSION};
+
+mod shared {
+    pub use shared::*;
+}
+
 // ---------------------------------------------------------------------------
 // Error codes — every contract_error code is documented here.
 // ---------------------------------------------------------------------------
@@ -170,6 +182,10 @@ impl SavingsVault {
             env.panic_with_error(Error::InvalidYieldRate);
         }
         env.storage().instance().set(&DATA_KEY.admin, &admin);
+        env.storage().instance().set(&DATA_KEY.acbu_token, &acbu_token);
+        env.storage().instance().set(&DATA_KEY.fee_rate, &fee_rate_bps);
+        env.storage().instance().set(&DATA_KEY.yield_rate, &yield_rate_bps);
+        env.storage().instance().set(&SharedDataKey::Version, &CONTRACT_VERSION);
         env.storage()
             .instance()
             .set(&DATA_KEY.acbu_token, &acbu_token);
@@ -520,6 +536,8 @@ impl SavingsVault {
             .set(&SharedDataKey::Version, &new_version);
     }
 
+    fn load_admin(env: &Env) -> Result<Address, Error> {
+        env.storage().instance().get(&DATA_KEY.admin).ok_or(Error::NoAdmin)
     pub fn cancel_upgrade(env: Env) {
         let admin = Self::load_admin(&env).unwrap_or_else(|e| env.panic_with_error(e));
         admin.require_auth();
@@ -538,6 +556,10 @@ impl SavingsVault {
         // Migration logic
     }
 
+    fn migrate_v0_to_v1(_env: Env) {
+        // Migration logic
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
@@ -550,6 +572,19 @@ impl SavingsVault {
                 .expect("Overflow in total balance calculation");
         }
         total
+    }
+
+    fn calculate_yield(
+        principal: i128,
+        yield_rate_bps: i128,
+        elapsed_seconds: u64,
+    ) -> Result<i128, Error> {
+        let elapsed_i128 = i128::from(elapsed_seconds);
+        let numerator = principal
+            .checked_mul(yield_rate_bps)
+            .and_then(|v| v.checked_mul(elapsed_i128))
+            .ok_or(Error::Overflow)?;
+        Ok(numerator / (BASIS_POINTS * SECONDS_PER_YEAR))
     }
 
     fn calculate_yield(

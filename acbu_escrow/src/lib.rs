@@ -19,6 +19,7 @@ pub enum EscrowError {
     AlreadyInitialized = 3008,
     TimelockNotElapsed = 3009,
     NoPendingUpgrade = 3010,
+    Unauthorized = 3011,
     Unknown = 3999,
 }
 
@@ -166,8 +167,10 @@ impl Escrow {
         Ok(())
     }
 
-    /// Release escrow: payee receives ACBU (payer authorization required)
-    /// caller must supply payer and escrow_id to identify which escrow to release
+    /// Release escrow: payee receives ACBU.
+    /// Only the payer or admin can authorize the release.
+
+
     pub fn release(env: Env, escrow_id: u64, payer: Address) -> Result<(), EscrowError> {
         // Re-entrancy guard
         reentrancy_guard::acquire_guard(&env);
@@ -180,9 +183,12 @@ impl Escrow {
         if paused {
             return Err(EscrowError::Paused);
         }
-
-        payer.require_auth();
-
+        let admin = Self::get_admin(&env)?;
+        if payer == admin {
+            admin.require_auth();
+        } else {
+            payer.require_auth();
+        }
         let key = EscrowId(payer.clone(), escrow_id);
         let (stored_payer, payee, amount): (Address, Address, i128) = env
             .storage()
@@ -192,16 +198,10 @@ impl Escrow {
         if stored_payer != payer {
             return Err(EscrowError::PayerMismatch);
         }
-
         let acbu = Self::get_acbu_token(&env)?;
         let client = soroban_sdk::token::Client::new(&env, &acbu);
-
-        // CEI: remove the escrow record before the external transfer so the
-        // escrow cannot be claimed a second time if the token executes a callback.
         env.storage().temporary().remove(&key);
-
         client.transfer(&env.current_contract_address(), &payee, &amount);
-
         env.events().publish(
             (symbol_short!("esc_rel"), escrow_id),
             EscrowReleasedEvent {
@@ -217,7 +217,6 @@ impl Escrow {
 
         Ok(())
     }
-
     /// Refund escrow: payer gets ACBU back (admin or dispute resolution)
     /// key is same as release since it identifies which escrow to refund
     pub fn refund(env: Env, escrow_id: u64, payer: Address) -> Result<(), EscrowError> {
@@ -361,3 +360,5 @@ impl Escrow {
         Ok(())
     }
 }
+
+
