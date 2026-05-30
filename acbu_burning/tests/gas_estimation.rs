@@ -57,12 +57,23 @@ fn gas_redeem_basket_five_currency_path_stays_under_budget() {
         .redeem_basket(&ctx.user, &recipients, &burn_amount);
 
     assert_eq!(amounts.len(), currency_codes.len() as u32);
+    for i in 0..amounts.len() {
+        assert_eq!(
+            amounts.get(i).unwrap(),
+            198_000_000,
+            "gas scenario must execute each five-currency basket transfer leg"
+        );
+    }
 
     let cpu = budget.cpu_instruction_cost();
     let mem = budget.memory_bytes_cost();
 
     assert!(cpu > 0, "budget tracker did not record CPU usage");
     assert!(mem > 0, "budget tracker did not record memory usage");
+
+    eprintln!(
+        "basket redeem budget: cpu={cpu}/{MAX_BASKET_REDEEM_CPU}, mem={mem}/{MAX_BASKET_REDEEM_MEM}"
+    );
 
     assert!(
         cpu <= MAX_BASKET_REDEEM_CPU,

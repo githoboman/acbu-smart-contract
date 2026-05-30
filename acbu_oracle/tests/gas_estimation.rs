@@ -70,11 +70,21 @@ fn gas_update_rate_median_quorum_sources_stays_under_budget() {
         &env.ledger().timestamp(),
     );
 
+    assert_eq!(
+        client.get_rate(&currency),
+        1_000_000,
+        "gas scenario must exercise and persist the median-derived rate"
+    );
+
     let cpu = budget.cpu_instruction_cost();
     let mem = budget.memory_bytes_cost();
 
     assert!(cpu > 0, "budget tracker did not record CPU usage");
     assert!(mem > 0, "budget tracker did not record memory usage");
+
+    eprintln!(
+        "oracle median update budget: cpu={cpu}/{MAX_MEDIAN_UPDATE_CPU}, mem={mem}/{MAX_MEDIAN_UPDATE_MEM}"
+    );
 
     assert!(
         cpu <= MAX_MEDIAN_UPDATE_CPU,
