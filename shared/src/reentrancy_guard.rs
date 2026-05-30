@@ -1,5 +1,3 @@
-#![no_std]
-
 use soroban_sdk::{contracterror, contracttype, symbol_short, Env, Symbol};
 
 /// Re-entrancy guard error
@@ -18,7 +16,7 @@ pub struct ReentrancyGuardKey {
 }
 
 const REENTRANCY_GUARD_KEY: ReentrancyGuardKey = ReentrancyGuardKey {
-    guard: symbol_short!("REENTRANCY_GUARD"),
+    guard: symbol_short!("REENT_G"),
 };
 
 /// Acquire the re-entrancy guard
