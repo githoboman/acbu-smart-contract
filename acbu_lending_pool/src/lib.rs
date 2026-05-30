@@ -300,7 +300,7 @@ impl LendingPool {
         env.events().publish(
             (symbol_short!("borrow"), borrower.clone()),
             BorrowEvent {
-                creator: borrower,
+                creator: borrower.clone(),
                 amount,
                 token: acbu_token,
                 loan_id,
@@ -416,7 +416,7 @@ impl LendingPool {
         env.events().publish(
             (symbol_short!("repay"), borrower.clone()),
             RepayEvent {
-                creator: borrower,
+                creator: borrower.clone(),
                 amount,
                 token: acbu_token,
                 loan_id,
