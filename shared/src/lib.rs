@@ -213,6 +213,12 @@ pub enum ContractError {
     InvalidRecipient = 11,
     /// WASM upgrade rejected: `new_version` must be greater than the stored version.
     InvalidVersion = 12,
+    /// `accept_admin`/`cancel_admin_transfer` called with no transfer pending.
+    NoPendingAdmin = 13,
+    /// `accept_admin` called before the admin-rotation timelock elapsed.
+    AdminTimelockNotElapsed = 14,
+    /// `cancel_admin_transfer` called with no transfer pending.
+    NoPendingAdminToCancel = 15,
 }
 
 /// Cross-contract method name constants — prevents silent logic splits from typos

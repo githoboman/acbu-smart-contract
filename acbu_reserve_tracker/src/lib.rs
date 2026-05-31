@@ -21,6 +21,12 @@ pub enum ReserveTrackerError {
     /// would trivially pass the reserve ratio check — callers should not rely on
     /// verify_reserves as a solvency signal before any tokens are minted.
     ZeroSupply = 8003,
+    /// `accept_admin`/`cancel_admin_transfer` called with no transfer pending.
+    NoPendingAdmin = 8004,
+    /// `accept_admin` called before the rotation timelock elapsed.
+    AdminTimelockNotElapsed = 8005,
+    /// `cancel_admin_transfer` called with no transfer pending.
+    NoPendingAdminToCancel = 8006,
 }
 
 #[contracttype]
@@ -32,6 +38,8 @@ pub struct DataKey {
     pub min_reserve_ratio: Symbol,
     pub acbu_token: Symbol,
     pub version: Symbol,
+    pub pending_admin: Symbol,
+    pub pending_admin_eligible_at: Symbol,
 }
 
 const DATA_KEY: DataKey = DataKey {
@@ -41,7 +49,14 @@ const DATA_KEY: DataKey = DataKey {
     min_reserve_ratio: symbol_short!("MIN_RES"),
     acbu_token: symbol_short!("ACBU_TKN"),
     version: symbol_short!("VERSION"),
+    pending_admin: symbol_short!("PEND_ADM"),
+    pending_admin_eligible_at: symbol_short!("PEND_ETA"),
 };
+
+/// Admin rotation timelock: the pending admin must wait this long before
+/// claiming ownership, giving the current admin a window to cancel a mistaken
+/// or malicious transfer.
+const ADMIN_TIMELOCK_SECONDS: u64 = 86_400;
 
 #[contract]
 pub struct ReserveTrackerContract;
@@ -235,6 +250,100 @@ impl ReserveTrackerContract {
         env.storage()
             .instance()
             .set(&DATA_KEY.acbu_token, &new_acbu_token);
+    }
+
+    // -----------------------------------------------------------------------
+    // Two-step admin rotation
+    //
+    // Mirrors the oracle's pattern: the current admin nominates a successor and
+    // starts a timelock; the successor must explicitly accept after the timelock
+    // elapses; the current admin can cancel a pending transfer at any time. This
+    // prevents a single fat-fingered or compromised key from being unrecoverable.
+    // -----------------------------------------------------------------------
+
+    /// Step 1 — current admin nominates `new_admin` and starts the timelock.
+    /// The current admin keeps full authority until `accept_admin` completes.
+    pub fn transfer_admin(env: Env, new_admin: Address) {
+        Self::check_admin(&env);
+        let eligible_at = env.ledger().timestamp() + ADMIN_TIMELOCK_SECONDS;
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.pending_admin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DATA_KEY.pending_admin_eligible_at, &eligible_at);
+        let current_admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        env.events().publish(
+            (symbol_short!("adm_init"),),
+            (current_admin, new_admin, eligible_at),
+        );
+    }
+
+    /// Step 2 — the nominated address claims ownership after the timelock.
+    pub fn accept_admin(env: Env) {
+        let pending_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.pending_admin)
+            .unwrap_or_else(|| env.panic_with_error(ReserveTrackerError::NoPendingAdmin));
+        pending_admin.require_auth();
+
+        let eligible_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.pending_admin_eligible_at)
+            .unwrap_or(u64::MAX);
+        if env.ledger().timestamp() < eligible_at {
+            env.panic_with_error(ReserveTrackerError::AdminTimelockNotElapsed);
+        }
+
+        let old_admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        env.storage().instance().set(&DATA_KEY.admin, &pending_admin);
+        env.storage().instance().remove(&DATA_KEY.pending_admin);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_admin_eligible_at);
+
+        env.events().publish(
+            (symbol_short!("adm_done"),),
+            (old_admin, pending_admin, env.ledger().timestamp()),
+        );
+    }
+
+    /// Cancel a pending transfer (current admin only).
+    pub fn cancel_admin_transfer(env: Env) {
+        Self::check_admin(&env);
+        let pending_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DATA_KEY.pending_admin)
+            .unwrap_or_else(|| env.panic_with_error(ReserveTrackerError::NoPendingAdminToCancel));
+        env.storage().instance().remove(&DATA_KEY.pending_admin);
+        env.storage()
+            .instance()
+            .remove(&DATA_KEY.pending_admin_eligible_at);
+        let admin: Address = env.storage().instance().get(&DATA_KEY.admin).unwrap();
+        env.events().publish(
+            (symbol_short!("adm_cncl"),),
+            (admin, pending_admin, env.ledger().timestamp()),
+        );
+    }
+
+    /// Current admin address.
+    pub fn get_admin(env: Env) -> Address {
+        env.storage().instance().get(&DATA_KEY.admin).unwrap()
+    }
+
+    /// Pending successor, if a transfer is in progress.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DATA_KEY.pending_admin)
+    }
+
+    /// Timestamp after which `accept_admin` becomes callable.
+    pub fn get_pending_admin_eligible_at(env: Env) -> Option<u64> {
+        env.storage()
+            .instance()
+            .get(&DATA_KEY.pending_admin_eligible_at)
     }
 
     // -----------------------------------------------------------------------
