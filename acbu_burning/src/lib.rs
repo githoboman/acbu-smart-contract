@@ -14,10 +14,10 @@ use shared::{
 };
 
 use shared::{
-    calculate_fee, BurnEvent, ContractError, CurrencyCode, DataKey as SharedDataKey, BASIS_POINTS,
-    CONTRACT_VERSION, DECIMALS, MIN_BURN_AMOUNT,
-    ORACLE_GET_ACBU_RATE, ORACLE_GET_CURRENCIES, ORACLE_GET_BASKET_WEIGHT,
-    ORACLE_GET_RATE, ORACLE_GET_S_TOKEN_ADDR, UPDATE_INTERVAL_SECONDS,
+    calculate_fee, reentrancy_guard, BurnEvent, ContractError, CurrencyCode,
+    DataKey as SharedDataKey, BASIS_POINTS, CONTRACT_VERSION, DECIMALS, MIN_BURN_AMOUNT,
+    ORACLE_GET_ACBU_RATE_WITH_TS, ORACLE_GET_BASKET_WEIGHT, ORACLE_GET_CURRENCIES, ORACLE_GET_RATE,
+    ORACLE_GET_RATE_WITH_TS, ORACLE_GET_S_TOKEN_ADDR, UPDATE_INTERVAL_SECONDS,
 };
 
 mod shared {
@@ -84,7 +84,9 @@ impl BurningContract {
         env.storage()
             .instance()
             .set(&DATA_KEY.fee_single_redeem, &fee_single_redeem_bps);
-        env.storage().instance().set(&SharedDataKey::Version, &CONTRACT_VERSION);
+        env.storage()
+            .instance()
+            .set(&SharedDataKey::Version, &CONTRACT_VERSION);
         env.storage().instance().set(&DATA_KEY.paused, &false);
         env.storage().instance().set(&DATA_KEY.min_burn_amount, &MIN_BURN_AMOUNT);
     }
@@ -128,7 +130,7 @@ impl BurningContract {
         // C-012: Ensure oracle rates are fresh before burning.
         let (acbu_rate, oracle_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, ORACLE_GET_ACBU_RATE),
+            &Symbol::new(&env, ORACLE_GET_ACBU_RATE_WITH_TS),
             vec![&env],
         );
         let current_time = env.ledger().timestamp();
@@ -138,7 +140,7 @@ impl BurningContract {
 
         let (rate, rate_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, ORACLE_GET_RATE),
+            &Symbol::new(&env, ORACLE_GET_RATE_WITH_TS),
             vec![&env, currency.clone().into_val(&env)],
         );
         if current_time > rate_timestamp.saturating_add(UPDATE_INTERVAL_SECONDS) {
@@ -265,7 +267,7 @@ impl BurningContract {
         // C-012: Ensure oracle rates are fresh before burning.
         let (acbu_rate, oracle_timestamp): (i128, u64) = env.invoke_contract(
             &oracle_addr,
-            &Symbol::new(&env, ORACLE_GET_ACBU_RATE),
+            &Symbol::new(&env, ORACLE_GET_ACBU_RATE_WITH_TS),
             vec![&env],
         );
         let current_time = env.ledger().timestamp();
