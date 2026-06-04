@@ -1,5 +1,3 @@
-#![no_std]
-
 use soroban_sdk::{contracterror, contracttype, symbol_short, Env, Symbol};
 
 /// Re-entrancy guard error

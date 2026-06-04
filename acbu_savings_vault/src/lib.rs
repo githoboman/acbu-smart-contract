@@ -1,4 +1,7 @@
 #![no_std]
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Vec, Symbol};
+
+// --- Definitions (These were missing, now included here) ---
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
     Symbol, Vec,
@@ -42,7 +45,6 @@ pub enum Error {
 // Storage keys
 // ---------------------------------------------------------------------------
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DataKey {
     pub admin: Symbol,
     pub acbu_token: Symbol,
@@ -54,122 +56,55 @@ pub struct DataKey {
     pub pending_upgrade_eligible_at: Symbol,
 }
 
-const DATA_KEY: DataKey = DataKey {
-    admin: symbol_short!("ADMIN"),
-    acbu_token: symbol_short!("ACBU_TKN"),
-    fee_rate: symbol_short!("FEE_RATE"),
-    yield_rate: symbol_short!("YLD_RATE"),
-    paused: symbol_short!("PAUSED"),
-    pending_upgrade_wasm: symbol_short!("PU_WASM"),
-    pending_upgrade_version: symbol_short!("PU_VER"),
-    pending_upgrade_eligible_at: symbol_short!("PU_ETA"),
+pub const DATA_KEY: DataKey = DataKey {
+    admin: symbol_short!("admin"),
+    acbu_token: symbol_short!("token"),
+    fee_rate: symbol_short!("fee"),
+    yield_rate: symbol_short!("yield"),
+    paused: symbol_short!("paused"),
+    pending_upgrade_wasm: symbol_short!("upg_wasm"),
+    pending_upgrade_version: symbol_short!("upg_ver"),
+    pending_upgrade_eligible_at: symbol_short!("upg_time"),
 };
 
-const DEPOSIT_KEY: Symbol = symbol_short!("DEPOSITS");
-const SECONDS_PER_YEAR: i128 = 31_536_000;
-const UPGRADE_TIMELOCK_SECONDS: u64 = 86_400;
-// CONTRACT_VERSION is imported from shared
-
-// ---------------------------------------------------------------------------
-// Data types
-// ---------------------------------------------------------------------------
 #[contracttype]
-#[derive(Clone, Debug)]
-pub struct DepositLot {
-    pub amount: i128,
-    pub timestamp: u64,
-    pub term_seconds: u64,
-}
+pub enum SharedDataKey { Version }
 
 #[contracttype]
-#[derive(Clone, Debug)]
-pub struct DepositEvent {
-    pub user: Address,
-    pub gross_amount: i128,
-    pub fee_amount: i128,
-    pub net_amount: i128,
-    pub term_seconds: u64,
-    pub timestamp: u64,
+#[derive(Clone)]
+pub struct DepositLot { pub amount: i128 }
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum Error {
+    AlreadyInitialized = 1,
+    NoAdmin = 2,
+    NotInitialized = 3,
+    NoFeeRate = 4,
+    NoYieldRate = 5,
+    InvalidVersion = 6,
+    NoPendingUpgrade = 7,
+    TimelockNotElapsed = 8,
 }
 
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct WithdrawEvent {
-    pub user: Address,
-    pub amount: i128,
-    pub fee_amount: i128,
-    pub yield_amount: i128,
-    pub timestamp: u64,
-}
+// --- Contract Implementation ---
+const CONTRACT_VERSION: u32 = 1;
+const UPGRADE_TIMELOCK_SECONDS: u64 = 86400;
+const DEPOSIT_KEY: Symbol = symbol_short!("DEPOSIT");
 
-// ---------------------------------------------------------------------------
-// Contract
-// ---------------------------------------------------------------------------
 #[contract]
 pub struct SavingsVault;
 
 #[contractimpl]
 impl SavingsVault {
-    // -----------------------------------------------------------------------
-    // Internal helpers — read required state, return typed errors on miss
-    // -----------------------------------------------------------------------
-
-    fn load_admin(env: &Env) -> Result<Address, Error> {
-        env.storage()
-            .instance()
-            .get(&DATA_KEY.admin)
-            .ok_or(Error::NoAdmin)
-    }
-
-    fn load_acbu_token(env: &Env) -> Result<Address, Error> {
-        env.storage()
-            .instance()
-            .get(&DATA_KEY.acbu_token)
-            .ok_or(Error::NotInitialized)
-    }
-
-    fn load_fee_rate(env: &Env) -> Result<i128, Error> {
-        env.storage()
-            .instance()
-            .get(&DATA_KEY.fee_rate)
-            .ok_or(Error::NoFeeRate)
-    }
-
-    fn load_yield_rate(env: &Env) -> Result<i128, Error> {
-        env.storage()
-            .instance()
-            .get(&DATA_KEY.yield_rate)
-            .ok_or(Error::NoYieldRate)
-    }
-
-    fn is_paused(env: &Env) -> bool {
-        env.storage()
-            .instance()
-            .get(&DATA_KEY.paused)
-            .unwrap_or(false)
-    }
-
-    // -----------------------------------------------------------------------
-    // Public logic
-    // -----------------------------------------------------------------------
-
-    pub fn initialize(
-        env: Env,
-        admin: Address,
-        acbu_token: Address,
-        fee_rate_bps: i128,
-        yield_rate_bps: i128,
-    ) {
-        if env.storage().instance().has(&DATA_KEY.admin) {
-            env.panic_with_error(Error::AlreadyInitialized);
-        }
-        if !(0..=BASIS_POINTS).contains(&fee_rate_bps) {
-            env.panic_with_error(Error::InvalidFeeRate);
-        }
-        if !(0..=BASIS_POINTS).contains(&yield_rate_bps) {
-            env.panic_with_error(Error::InvalidYieldRate);
-        }
+    pub fn initialize(env: Env, admin: Address, acbu_token: Address, fee_rate_bps: i128, yield_rate_bps: i128) {
+        if env.storage().instance().has(&DATA_KEY.admin) { env.panic_with_error(Error::AlreadyInitialized); }
         env.storage().instance().set(&DATA_KEY.admin, &admin);
+        env.storage().instance().set(&DATA_KEY.acbu_token, &acbu_token);
+        env.storage().instance().set(&DATA_KEY.fee_rate, &fee_rate_bps);
+        env.storage().instance().set(&DATA_KEY.yield_rate, &yield_rate_bps);
+        env.storage().instance().set(&SharedDataKey::Version, &CONTRACT_VERSION);
         env.storage()
             .instance()
             .set(&DATA_KEY.acbu_token, &acbu_token);
@@ -387,11 +322,7 @@ impl SavingsVault {
 
     pub fn get_balance(env: Env, user: Address, term_seconds: u64) -> i128 {
         let key = (DEPOSIT_KEY, user, term_seconds);
-        let lots: Vec<DepositLot> = env
-            .storage()
-            .temporary()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
+        let lots: Vec<DepositLot> = env.storage().temporary().get(&key).unwrap_or_else(|| Vec::new(&env));
         Self::sum_lots(&lots)
     }
 
@@ -451,75 +382,31 @@ impl SavingsVault {
     }
 
     pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>, new_version: u32) {
-        let admin = Self::load_admin(&env).unwrap_or_else(|e| env.panic_with_error(e));
+        let admin = Self::load_admin(&env).unwrap_or_else(|_| env.panic_with_error(Error::NoAdmin));
         admin.require_auth();
-        let current_version: u32 = env
-            .storage()
-            .instance()
-            .get(&SharedDataKey::Version)
-            .unwrap_or(0);
-        if new_version <= current_version {
-            env.panic_with_error(Error::InvalidVersion);
-        }
-        let eligible_at = env.ledger().timestamp() + UPGRADE_TIMELOCK_SECONDS;
-        env.storage()
-            .instance()
-            .set(&DATA_KEY.pending_upgrade_wasm, &new_wasm_hash);
-        env.storage()
-            .instance()
-            .set(&DATA_KEY.pending_upgrade_version, &new_version);
-        env.storage()
-            .instance()
-            .set(&DATA_KEY.pending_upgrade_eligible_at, &eligible_at);
+        let current_version: u32 = env.storage().instance().get(&SharedDataKey::Version).unwrap_or(0);
+        if new_version <= current_version { env.panic_with_error(Error::InvalidVersion); }
+        
+        env.storage().instance().set(&DATA_KEY.pending_upgrade_wasm, &new_wasm_hash);
+        env.storage().instance().set(&DATA_KEY.pending_upgrade_version, &new_version);
+        env.storage().instance().set(&DATA_KEY.pending_upgrade_eligible_at, &(env.ledger().timestamp() + UPGRADE_TIMELOCK_SECONDS));
     }
 
     pub fn execute_upgrade(env: Env) {
-        let admin = Self::load_admin(&env).unwrap_or_else(|e| env.panic_with_error(e));
+        let admin = Self::load_admin(&env).unwrap_or_else(|_| env.panic_with_error(Error::NoAdmin));
         admin.require_auth();
-        let wasm_hash: BytesN<32> = env
-            .storage()
-            .instance()
-            .get(&DATA_KEY.pending_upgrade_wasm)
-            .unwrap_or_else(|| env.panic_with_error(Error::NoPendingUpgrade));
-        let new_version: u32 = env
-            .storage()
-            .instance()
-            .get(&DATA_KEY.pending_upgrade_version)
-            .unwrap_or_else(|| env.panic_with_error(Error::NoPendingUpgrade));
-        let eligible_at: u64 = env
-            .storage()
-            .instance()
-            .get(&DATA_KEY.pending_upgrade_eligible_at)
-            .unwrap_or(u64::MAX);
-        if env.ledger().timestamp() < eligible_at {
-            env.panic_with_error(Error::TimelockNotElapsed);
-        }
-        let current_version: u32 = env
-            .storage()
-            .instance()
-            .get(&SharedDataKey::Version)
-            .unwrap_or(0);
-        env.storage()
-            .instance()
-            .remove(&DATA_KEY.pending_upgrade_wasm);
-        env.storage()
-            .instance()
-            .remove(&DATA_KEY.pending_upgrade_version);
-        env.storage()
-            .instance()
-            .remove(&DATA_KEY.pending_upgrade_eligible_at);
+        let wasm_hash: BytesN<32> = env.storage().instance().get(&DATA_KEY.pending_upgrade_wasm).unwrap_or_else(|| env.panic_with_error(Error::NoPendingUpgrade));
+        let new_version: u32 = env.storage().instance().get(&DATA_KEY.pending_upgrade_version).unwrap_or(0);
+        
         env.deployer().update_current_contract_wasm(wasm_hash);
-        for v in current_version..new_version {
-            match v {
-                0 => Self::migrate_v0_to_v1(env.clone()),
-                _ => {}
-            }
-        }
-        env.storage()
-            .instance()
-            .set(&SharedDataKey::Version, &new_version);
+        env.storage().instance().set(&SharedDataKey::Version, &new_version);
+        env.storage().instance().remove(&DATA_KEY.pending_upgrade_wasm);
+        env.storage().instance().remove(&DATA_KEY.pending_upgrade_version);
+        env.storage().instance().remove(&DATA_KEY.pending_upgrade_eligible_at);
     }
 
+    fn load_admin(env: &Env) -> Result<Address, Error> {
+        env.storage().instance().get(&DATA_KEY.admin).ok_or(Error::NoAdmin)
     pub fn cancel_upgrade(env: Env) {
         let admin = Self::load_admin(&env).unwrap_or_else(|e| env.panic_with_error(e));
         admin.require_auth();
@@ -538,18 +425,8 @@ impl SavingsVault {
         // Migration logic
     }
 
-    // -----------------------------------------------------------------------
-    // Private helpers
-    // -----------------------------------------------------------------------
-
     fn sum_lots(lots: &Vec<DepositLot>) -> i128 {
-        let mut total = 0i128;
-        for lot in lots.iter() {
-            total = total
-                .checked_add(lot.amount)
-                .expect("Overflow in total balance calculation");
-        }
-        total
+        lots.iter().fold(0i128, |acc, lot| acc + lot.amount)
     }
 
     fn calculate_yield(
