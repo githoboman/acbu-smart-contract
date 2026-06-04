@@ -16,7 +16,7 @@ pub struct ReentrancyGuardKey {
 }
 
 const REENTRANCY_GUARD_KEY: ReentrancyGuardKey = ReentrancyGuardKey {
-    guard: symbol_short!("REENT_G"),
+    guard: symbol_short!("REENTRANT"),
 };
 
 /// Acquire the re-entrancy guard
