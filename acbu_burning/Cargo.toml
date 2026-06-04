@@ -12,4 +12,5 @@ soroban-sdk = "21.0.0"
 shared = { path = "../shared" }
 
 [dev-dependencies]
+proptest = "1.11.0"
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }
